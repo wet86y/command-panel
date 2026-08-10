@@ -29,10 +29,9 @@ cmake --build build --config Release
 
 ```text
 build\Release\CommandPanel.exe
-build\Release\config.json
 ```
 
-`config.json` 是运行时用户配置，不应提交到 Git；首次运行时可以从 `config.example.json` 复制并按需修改。配置只从 EXE 所在目录读取。
+运行时配置位于 `%LOCALAPPDATA%\快捷控制台\config.json`。首次启动会创建目录并写入三个默认标签页；若新版配置尚不存在而 EXE 旁有旧 `config.json`，程序会自动迁移旧配置。默认标签仅在首次创建时写入，后续删除不会在重启时恢复。配置同时记录窗口尺寸及按钮、终端、输入三个区域的分隔位置。
 
 ## 配置
 
@@ -72,7 +71,7 @@ build\Release\config.json
 | `TerminalSession` | ConPTY、PowerShell、读写线程、队列、Resize 和句柄释放 |
 | `TerminalParser` | UTF-8 流解码、基础 ANSI/VT 过滤、回车换行和退格处理 |
 | `CommandExecutor` | Base64 命令包装、执行 ID、完成标记、busy 和退出码 |
-| `ConfigManager` | UTF-8 JSON、UTF-16 UI 转换、迁移和原子保存 |
+| `ConfigManager` | 用户 AppData 配置、UTF-8 JSON、旧路径迁移、UI 状态和原子保存 |
 | `CommandDialog` | 命令名称、命令内容和确认选项编辑 |
 
 UI 线程不直接读取 ConPTY 管道。终端后台线程通过 `PostMessageW` 把输出和退出事件交给主窗口，窗口关闭时先停止会话，再释放线程和句柄。

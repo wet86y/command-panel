@@ -1,5 +1,11 @@
 {
   "version": 2,
+  "ui": {
+    "window_width": 0,
+    "window_height": 0,
+    "button_section_height": 0,
+    "input_section_height": 0
+  },
   "tabs": [
     {
       "id": "common",

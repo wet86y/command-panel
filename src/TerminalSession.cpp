@@ -110,9 +110,18 @@ bool TerminalSession::CreateShellProcess()
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION processInfo{};
     std::wstring commandLine = L"\"" + shellPath + L"\" -NoLogo -NoProfile";
+    std::wstring userProfile;
+    const DWORD profileRequired = GetEnvironmentVariableW(L"USERPROFILE", nullptr, 0);
+    if (profileRequired > 1) {
+        userProfile.resize(profileRequired);
+        const DWORD profileLength = GetEnvironmentVariableW(L"USERPROFILE", userProfile.data(), profileRequired);
+        if (profileLength > 0 && profileLength < profileRequired) userProfile.resize(profileLength);
+        else userProfile.clear();
+    }
     const DWORD flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
     const BOOL created = CreateProcessW(shellPath.c_str(), commandLine.data(), nullptr, nullptr, FALSE,
-                                        flags, nullptr, nullptr, &startup.StartupInfo, &processInfo);
+                                        flags, nullptr, userProfile.empty() ? nullptr : userProfile.c_str(),
+                                        &startup.StartupInfo, &processInfo);
     DeleteProcThreadAttributeList(attributes);
     HeapFree(GetProcessHeap(), 0, attributes);
     if (!created) {

@@ -202,6 +202,7 @@ MainWindow::~MainWindow()
 bool MainWindow::Create(HINSTANCE instance)
 {
     instance_ = instance;
+    configLoadSucceeded_ = config_.Load();
     appIcon_ = LoadIconW(instance_, MAKEINTRESOURCEW(IdAppIcon));
     static bool registered = false;
     const wchar_t* className = L"CommandPanelMainWindow";
@@ -220,10 +221,15 @@ bool MainWindow::Create(HINSTANCE instance)
     RECT workArea{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
     const UINT initialDpi = GetDpiForSystem();
-    const int windowWidth = std::min(Ui::Scale(1100, initialDpi),
-                                     static_cast<int>(workArea.right - workArea.left - Ui::Scale(40, initialDpi)));
-    const int windowHeight = std::min(Ui::Scale(780, initialDpi),
-                                      static_cast<int>(workArea.bottom - workArea.top - Ui::Scale(40, initialDpi)));
+    const UiState& savedUi = config_.Ui();
+    const int desiredWidth = savedUi.windowWidth > 0
+        ? MulDiv(savedUi.windowWidth, static_cast<int>(initialDpi), 96) : Ui::Scale(1100, initialDpi);
+    const int desiredHeight = savedUi.windowHeight > 0
+        ? MulDiv(savedUi.windowHeight, static_cast<int>(initialDpi), 96) : Ui::Scale(780, initialDpi);
+    const int windowWidth = std::clamp(desiredWidth, Ui::Scale(820, initialDpi),
+                                       static_cast<int>(workArea.right - workArea.left - Ui::Scale(40, initialDpi)));
+    const int windowHeight = std::clamp(desiredHeight, Ui::Scale(650, initialDpi),
+                                        static_cast<int>(workArea.bottom - workArea.top - Ui::Scale(40, initialDpi)));
     const int windowLeft = workArea.left + (workArea.right - workArea.left - windowWidth) / 2;
     const int windowTop = workArea.top + (workArea.bottom - workArea.top - windowHeight) / 2;
     hwnd_ = CreateWindowExW(0, className, L"快捷控制台",
@@ -340,7 +346,12 @@ bool MainWindow::Initialize()
     inputOriginalProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(input_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(InputProc)));
     SetWindowLongPtrW(input_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
-    if (!config_.Load()) AddDiagnostic(L"[快捷控制台] " + config_.LastError() + L"\r\n");
+    if (!configLoadSucceeded_) AddDiagnostic(L"[快捷控制台] " + config_.LastError() + L"\r\n");
+    const UINT layoutDpi = GetDpiForWindow(hwnd_);
+    if (config_.Ui().buttonSectionHeight > 0)
+        buttonSectionHeight_ = MulDiv(config_.Ui().buttonSectionHeight, static_cast<int>(layoutDpi), 96);
+    if (config_.Ui().inputSectionHeight > 0)
+        inputSectionHeight_ = MulDiv(config_.Ui().inputSectionHeight, static_cast<int>(layoutDpi), 96);
     RefreshTabs();
     RefreshButtons();
     Layout();
@@ -529,8 +540,8 @@ void MainWindow::Layout()
 
 void MainWindow::RefreshTabs()
 {
-    if (config_.Tabs().empty()) config_.Tabs() = ConfigManager::DefaultTabs();
-    activeTab_ = std::clamp(activeTab_, 0, static_cast<int>(config_.Tabs().size()) - 1);
+    activeTab_ = config_.Tabs().empty()
+        ? -1 : std::clamp(activeTab_, 0, static_cast<int>(config_.Tabs().size()) - 1);
     std::vector<std::wstring> names;
     for (const auto& tab : config_.Tabs()) names.push_back(tab.name);
     tabBar_.SetTabs(names, activeTab_);
@@ -538,7 +549,11 @@ void MainWindow::RefreshTabs()
 
 void MainWindow::RefreshButtons()
 {
-    if (config_.Tabs().empty()) return;
+    if (config_.Tabs().empty()) {
+        buttonPanel_.SetButtons({});
+        UpdateBusyState();
+        return;
+    }
     activeTab_ = std::clamp(activeTab_, 0, static_cast<int>(config_.Tabs().size()) - 1);
     buttonPanel_.SetButtons(config_.Tabs()[activeTab_].buttons);
     UpdateBusyState();
@@ -592,9 +607,8 @@ void MainWindow::DeleteTab(int index)
     const auto previousTabs = config_.Tabs();
     const int previousActive = activeTab_;
     config_.Tabs().erase(config_.Tabs().begin() + index);
-    if (config_.Tabs().empty())
-        config_.Tabs().push_back(CommandTab{ConfigManager::NewId(), L"新标签页", {}});
-    if (activeTab_ > index) --activeTab_;
+    if (config_.Tabs().empty()) activeTab_ = -1;
+    else if (activeTab_ > index) --activeTab_;
     else if (activeTab_ == index) activeTab_ = std::min(index, static_cast<int>(config_.Tabs().size()) - 1);
 
     if (!SaveConfig()) {
@@ -797,6 +811,22 @@ bool MainWindow::SaveConfig()
     if (config_.Save()) return true;
     MessageBoxW(hwnd_, config_.LastError().c_str(), L"配置保存失败", MB_OK | MB_ICONERROR);
     return false;
+}
+
+void MainWindow::PersistUiState()
+{
+    if (hwnd_ == nullptr) return;
+    WINDOWPLACEMENT placement{sizeof(placement)};
+    RECT windowRect{};
+    if (GetWindowPlacement(hwnd_, &placement)) windowRect = placement.rcNormalPosition;
+    else GetWindowRect(hwnd_, &windowRect);
+    const UINT dpi = GetDpiForWindow(hwnd_);
+    UiState& state = config_.Ui();
+    state.windowWidth = std::max(1, MulDiv(windowRect.right - windowRect.left, 96, static_cast<int>(dpi)));
+    state.windowHeight = std::max(1, MulDiv(windowRect.bottom - windowRect.top, 96, static_cast<int>(dpi)));
+    state.buttonSectionHeight = std::max(0, MulDiv(buttonSectionHeight_, 96, static_cast<int>(dpi)));
+    state.inputSectionHeight = std::max(0, MulDiv(inputSectionHeight_, 96, static_cast<int>(dpi)));
+    if (!config_.Save()) SetStatus(L"配置保存失败");
 }
 
 void MainWindow::ResetTerminal(bool ask)
@@ -1002,6 +1032,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         if (resizeHitTest_ != HTNOWHERE) {
             resizeHitTest_ = HTNOWHERE;
             ReleaseCapture();
+            PersistUiState();
             return 0;
         }
         if (activeSplitter_ != 0) {
@@ -1011,6 +1042,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             Layout();
             SetWindowLongPtrW(hwnd_, GWL_EXSTYLE,
                               GetWindowLongPtrW(hwnd_, GWL_EXSTYLE) & ~static_cast<LONG_PTR>(WS_EX_COMPOSITED));
+            PersistUiState();
             return 0;
         }
         break;
@@ -1021,7 +1053,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             buttonPanel_.SetResizeSuspended(false);
             SetWindowLongPtrW(hwnd_, GWL_EXSTYLE,
                               GetWindowLongPtrW(hwnd_, GWL_EXSTYLE) & ~static_cast<LONG_PTR>(WS_EX_COMPOSITED));
-            InvalidateRect(hwnd_, nullptr, FALSE);
+            Layout();
+            PersistUiState();
         }
         break;
     case WM_PAINT: {
@@ -1210,6 +1243,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_CLOSE:
         shuttingDown_ = true;
+        PersistUiState();
         EnableWindow(buttonPanel_.Hwnd(), FALSE);
         session_.Stop();
         DestroyWindow(hwnd_);

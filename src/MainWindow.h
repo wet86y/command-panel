@@ -72,6 +72,7 @@ private:
     bool SaveConfig();
     void UpdateBusyState();
     void AddDiagnostic(const std::wstring& text);
+    void PersistUiState();
 
     HWND hwnd_ = nullptr;
     HWND output_ = nullptr;
@@ -110,6 +111,7 @@ private:
     int historyPosition_ = -1;
     bool shuttingDown_ = false;
     bool terminalReady_ = false;
+    bool configLoadSucceeded_ = true;
     int restartAttempts_ = 0;
     uint64_t currentGeneration_ = 0;
     int activeTab_ = 0;

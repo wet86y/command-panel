@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <objbase.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <chrono>
@@ -17,7 +18,8 @@ class JsonParser
 public:
     explicit JsonParser(std::string text) : text_(std::move(text)) {}
 
-    bool Parse(std::vector<CommandButton>& buttons, std::vector<CommandTab>& tabs, std::wstring& error)
+    bool Parse(std::vector<CommandButton>& buttons, std::vector<CommandTab>& tabs,
+               UiState& ui, bool& parsedTabsRoot, std::wstring& error)
     {
         Skip();
         if (!Consume('{')) return Fail(L"根节点必须是对象", error);
@@ -38,6 +40,8 @@ public:
             } else if (key == "tabs") {
                 if (!ParseTabs(tabs, error)) return false;
                 hasTabs = true;
+            } else if (key == "ui") {
+                if (!ParseUi(ui, error)) return false;
             } else {
                 if (!SkipValue()) return Fail(L"无法跳过未知字段", error);
             }
@@ -49,6 +53,7 @@ public:
         if (position_ != text_.size()) return Fail(L"配置末尾存在多余内容", error);
         if (version != 1 && version != 2) return Fail(L"不支持的配置版本", error);
         if (!hasButtons && !hasTabs) return Fail(L"配置缺少 buttons 或 tabs", error);
+        parsedTabsRoot = hasTabs;
         return true;
     }
 
@@ -86,6 +91,32 @@ public:
             Skip();
             if (Consume(']')) break;
             if (!Consume(',')) return Fail(L"标签页之间缺少逗号", error);
+        }
+        return true;
+    }
+
+    bool ParseUi(UiState& ui, std::wstring& error)
+    {
+        if (!Consume('{')) return Fail(L"ui 必须是对象", error);
+        Skip();
+        if (Consume('}')) return true;
+        while (true) {
+            std::string key;
+            if (!String(key) || !Consume(':')) return Fail(L"ui 字段无效", error);
+            int value = 0;
+            if (key == "window_width" || key == "window_height" ||
+                key == "button_section_height" || key == "input_section_height") {
+                if (!Integer(value) || value < 0) return Fail(L"ui 尺寸必须是非负整数", error);
+                if (key == "window_width") ui.windowWidth = value;
+                else if (key == "window_height") ui.windowHeight = value;
+                else if (key == "button_section_height") ui.buttonSectionHeight = value;
+                else ui.inputSectionHeight = value;
+            } else if (!SkipValue()) {
+                return Fail(L"无法跳过 ui 未知字段", error);
+            }
+            Skip();
+            if (Consume('}')) break;
+            if (!Consume(',')) return Fail(L"ui 字段之间缺少逗号", error);
         }
         return true;
     }
@@ -307,7 +338,18 @@ ConfigManager::ConfigManager()
 {
     wchar_t modulePath[MAX_PATH]{};
     const DWORD length = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-    path_ = std::filesystem::path(modulePath, modulePath + length).parent_path() / L"config.json";
+    legacyPath_ = std::filesystem::path(modulePath, modulePath + length).parent_path() / L"config.json";
+    PWSTR localAppData = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &localAppData))) {
+        path_ = std::filesystem::path(localAppData) / L"快捷控制台" / L"config.json";
+        CoTaskMemFree(localAppData);
+    } else {
+        wchar_t fallback[MAX_PATH]{};
+        const DWORD fallbackLength = GetEnvironmentVariableW(L"LOCALAPPDATA", fallback, MAX_PATH);
+        path_ = fallbackLength > 0 && fallbackLength < MAX_PATH
+            ? std::filesystem::path(fallback, fallback + fallbackLength) / L"快捷控制台" / L"config.json"
+            : legacyPath_;
+    }
 }
 
 bool ConfigManager::Load()
@@ -315,11 +357,25 @@ bool ConfigManager::Load()
     lastError_.clear();
     wasMissing_ = false;
     tabs_.clear();
+    ui_ = {};
     if (!std::filesystem::exists(path_)) {
-        wasMissing_ = true;
-        tabs_ = DefaultTabs();
-        if (!Save()) return false;
-        return true;
+        std::error_code directoryError;
+        std::filesystem::create_directories(path_.parent_path(), directoryError);
+        if (directoryError) {
+            lastError_ = L"无法创建配置目录：" + path_.parent_path().wstring();
+            return false;
+        }
+        if (path_ != legacyPath_ && std::filesystem::exists(legacyPath_)) {
+            if (!CopyFileW(legacyPath_.c_str(), path_.c_str(), TRUE)) {
+                lastError_ = L"无法迁移旧配置：" + Win32ErrorMessage(GetLastError());
+                return false;
+            }
+        } else {
+            wasMissing_ = true;
+            tabs_ = DefaultTabs();
+            if (!Save()) return false;
+            return true;
+        }
     }
 
     std::string content;
@@ -329,10 +385,12 @@ bool ConfigManager::Load()
     JsonParser parser(std::move(content));
     std::vector<CommandButton> legacyButtons;
     std::vector<CommandTab> parsedTabs;
+    UiState parsedUi;
+    bool parsedTabsRoot = false;
     auto parseRoot = [&]() -> bool {
         // Parse the document once as a legacy root. The parser's root parser is
         // extended below through a small compatibility conversion path.
-        return parser.Parse(legacyButtons, parsedTabs, lastError_);
+        return parser.Parse(legacyButtons, parsedTabs, parsedUi, parsedTabsRoot, lastError_);
     };
     if (!parseRoot()) {
         SYSTEMTIME time{};
@@ -346,7 +404,7 @@ bool ConfigManager::Load()
         lastError_ = L"配置文件解析失败：" + lastError_ + L"。原文件已保留为：" + broken;
         return false;
     }
-    if (!parsedTabs.empty()) {
+    if (parsedTabsRoot) {
         tabs_ = std::move(parsedTabs);
     } else if (!legacyButtons.empty()) {
         tabs_ = DefaultTabs();
@@ -365,13 +423,25 @@ bool ConfigManager::Load()
         // Upgrade version 1 files immediately so the next launch preserves tabs.
         Save();
     }
+    ui_ = parsedUi;
     return true;
 }
 
 bool ConfigManager::Save()
 {
     lastError_.clear();
-    std::string content = "{\n  \"version\": 2,\n  \"tabs\": [\n";
+    std::error_code directoryError;
+    std::filesystem::create_directories(path_.parent_path(), directoryError);
+    if (directoryError) {
+        lastError_ = L"无法创建配置目录：" + path_.parent_path().wstring();
+        return false;
+    }
+    std::string content = "{\n  \"version\": 2,\n  \"ui\": {\n";
+    content += "    \"window_width\": " + std::to_string(ui_.windowWidth) + ",\n";
+    content += "    \"window_height\": " + std::to_string(ui_.windowHeight) + ",\n";
+    content += "    \"button_section_height\": " + std::to_string(ui_.buttonSectionHeight) + ",\n";
+    content += "    \"input_section_height\": " + std::to_string(ui_.inputSectionHeight) + "\n";
+    content += "  },\n  \"tabs\": [\n";
     for (size_t tabIndex = 0; tabIndex < tabs_.size(); ++tabIndex) {
         const auto& tab = tabs_[tabIndex];
         content += "    {\n      \"id\": " + EscapeJson(Utf8ToWide(tab.id)) + ",\n";
