@@ -1,0 +1,12 @@
+#pragma once
+
+#include "ConfigManager.h"
+
+#include <windows.h>
+
+class CommandDialog
+{
+public:
+    static bool Show(HWND owner, const CommandButton& initial, CommandButton& result);
+    static bool PromptName(HWND owner, const std::wstring& title, const std::wstring& initial, std::wstring& result);
+};

@@ -1,0 +1,19 @@
+# CMake and Visual Studio output
+build/
+build-ui/
+.vs/
+out/
+
+# Runtime/user-local configuration
+config.json
+**/config.json
+
+# Local diagnostics and visual QA captures
+*.log
+*.png
+*.bmp
+*.jpg
+
+# Common local editor files
+.clangd/
+.cache/
