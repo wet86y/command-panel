@@ -21,7 +21,7 @@ int App::Run(HINSTANCE instance, int showCommand)
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     if (!IsElevated()) {
-        MessageBoxW(nullptr, L"当前进程未取得管理员权限，CommandPanel 无法继续。", L"CommandPanel", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"当前进程未取得管理员权限，快捷控制台无法继续。", L"快捷控制台", MB_OK | MB_ICONERROR);
         if (SUCCEEDED(comResult)) CoUninitialize();
         return 1;
     }
@@ -29,7 +29,7 @@ int App::Run(HINSTANCE instance, int showCommand)
     InitCommonControlsEx(&controls);
     MainWindow window;
     if (!window.Create(instance) || !window.Initialize()) {
-        MessageBoxW(nullptr, L"CommandPanel 主窗口初始化失败。", L"CommandPanel", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"快捷控制台主窗口初始化失败。", L"快捷控制台", MB_OK | MB_ICONERROR);
         if (SUCCEEDED(comResult)) CoUninitialize();
         return 1;
     }

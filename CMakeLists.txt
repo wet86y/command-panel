@@ -13,11 +13,13 @@ add_executable(CommandPanel WIN32
     src/ButtonPanel.cpp
     src/TabBar.cpp
     src/CommandDialog.cpp
+    src/CommandMenu.cpp
     src/ConfigManager.cpp
     src/TerminalSession.cpp
     src/TerminalParser.cpp
     src/CommandExecutor.cpp
     src/Utf.cpp
+    src/UiTheme.cpp
     resources/app.rc
 )
 
@@ -49,6 +51,7 @@ target_link_libraries(CommandPanel PRIVATE
     ole32
     crypt32
     dwmapi
+    gdiplus
 )
 
 if(MSVC)

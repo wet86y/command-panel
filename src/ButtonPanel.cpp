@@ -1,4 +1,5 @@
 #include "ButtonPanel.h"
+#include "UiTheme.h"
 
 #include <windowsx.h>
 
@@ -8,13 +9,6 @@ namespace {
 constexpr int FirstButtonId = 1000;
 constexpr int AddButtonId = 0x7FFF;
 
-HFONT CreatePanelFont()
-{
-    const int dpi = GetDpiForSystem();
-    return CreateFontW(-MulDiv(11, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-}
 }
 
 ButtonPanel::~ButtonPanel()
@@ -39,7 +33,8 @@ bool ButtonPanel::Create(HWND parent)
     hwnd_ = CreateWindowExW(0, className, nullptr,
                             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP,
                             0, 0, 0, 0, parent, nullptr, GetModuleHandleW(nullptr), this);
-    font_ = CreatePanelFont();
+    fontDpi_ = GetDpiForWindow(hwnd_);
+    font_ = Ui::CreateFont(fontDpi_, 9);
     return hwnd_ != nullptr;
 }
 
@@ -65,12 +60,14 @@ void ButtonPanel::Rebuild(const std::vector<CommandButton>& buttons)
                                        0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(FirstButtonId + static_cast<int>(i))),
                                        GetModuleHandleW(nullptr), nullptr);
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+        Ui::TrackOwnerDrawButton(control);
         controls_.push_back(control);
         enabled_.push_back(buttons[i].enabled);
     }
     HWND add = CreateWindowExW(0, L"BUTTON", L"+ 添加按钮", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
                                0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(AddButtonId)), GetModuleHandleW(nullptr), nullptr);
     SendMessageW(add, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+    Ui::TrackOwnerDrawButton(add);
     controls_.push_back(add);
     enabled_.push_back(true);
     scrollPosition_ = 0;
@@ -85,6 +82,12 @@ void ButtonPanel::SetBusy(bool busy)
         const bool isAdd = i + 1 == controls_.size();
         EnableWindow(controls_[i], isAdd ? TRUE : (enabled_[i] && !busy_));
     }
+}
+
+void ButtonPanel::SetResizeSuspended(bool suspended)
+{
+    resizeSuspended_ = suspended;
+    if (!resizeSuspended_) Layout();
 }
 
 int ButtonPanel::ButtonIndex(HWND button) const
@@ -105,15 +108,26 @@ void ButtonPanel::ScrollTo(int position)
 
 void ButtonPanel::Layout()
 {
-    if (hwnd_ == nullptr) return;
+    if (hwnd_ == nullptr || resizeSuspended_) return;
     RECT client{};
     GetClientRect(hwnd_, &client);
-    const int margin = 12;
-    const int gap = 14;
-    const int height = 64;
+    const UINT dpi = GetDpiForWindow(hwnd_);
+    if (fontDpi_ != dpi) {
+        if (font_ != nullptr) DeleteObject(font_);
+        fontDpi_ = dpi;
+        font_ = Ui::CreateFont(dpi, 9);
+        for (HWND control : controls_)
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+    }
+    const int margin = Ui::Scale(12, dpi);
+    const int gap = Ui::Scale(14, dpi);
+    const int height = Ui::CompactScale(64, dpi);
     const int widthLimit = std::max(100, static_cast<int>(client.right) - margin * 2);
-    const int columns = widthLimit >= 760 ? 4 : std::max(1, (widthLimit + gap) / (180 + gap));
-    const int cellWidth = std::max(100, (widthLimit - gap * (columns - 1)) / columns);
+    const int columns = widthLimit >= Ui::Scale(760, dpi)
+        ? 4 : std::max(1, (widthLimit + gap) / (Ui::Scale(180, dpi) + gap));
+    const int slotWidth = std::max(100, (widthLimit - gap * (columns - 1)) / columns);
+    const int cardInset = std::min(Ui::Scale(10, dpi), std::max(0, (slotWidth - 100) / 2));
+    const int cardWidth = std::max(100, slotWidth - cardInset * 2);
     HDC dc = GetDC(hwnd_);
     HFONT old = static_cast<HFONT>(SelectObject(dc, font_));
     int x = margin;
@@ -121,9 +135,9 @@ void ButtonPanel::Layout()
     for (size_t index = 0; index < controls_.size(); ++index) {
         const int column = static_cast<int>(index % columns);
         const int row = static_cast<int>(index / columns);
-        x = margin + column * (cellWidth + gap);
+        x = margin + column * (slotWidth + gap) + (slotWidth - cardWidth) / 2;
         y = margin + row * (height + gap) - scrollPosition_;
-        MoveWindow(controls_[index], x, y, cellWidth, height, TRUE);
+        MoveWindow(controls_[index], x, y, cardWidth, height, TRUE);
     }
     SelectObject(dc, old);
     ReleaseDC(hwnd_, dc);
@@ -157,11 +171,15 @@ LRESULT ButtonPanel::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         HDC dc = BeginPaint(hwnd_, &paint);
         RECT client{};
         GetClientRect(hwnd_, &client);
-        FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+        HBRUSH background = CreateSolidBrush(Ui::Window);
+        FillRect(dc, &client, background);
+        DeleteObject(background);
         EndPaint(hwnd_, &paint);
         return 0;
     }
-    case WM_SIZE: Layout(); return 0;
+    case WM_SIZE:
+        if (!resizeSuspended_) Layout();
+        return 0;
     case WM_VSCROLL: {
         SCROLLINFO info{sizeof(info), SIF_ALL};
         GetScrollInfo(hwnd_, SB_VERT, &info);
@@ -193,22 +211,19 @@ LRESULT ButtonPanel::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         RECT rect = item->rcItem;
         const bool selected = (item->itemState & ODS_SELECTED) != 0;
         const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+        const bool hot = Ui::IsControlHot(item->hwndItem);
+        const bool focused = (item->itemState & ODS_FOCUS) != 0;
         const bool isAdd = item->CtlID == AddButtonId;
-        HBRUSH background = CreateSolidBrush(disabled ? RGB(246, 247, 249) : (selected ? RGB(235, 243, 255) : RGB(255, 255, 255)));
-        FillRect(item->hDC, &rect, background);
-        DeleteObject(background);
-        HPEN border = CreatePen(isAdd ? PS_DASH : PS_SOLID, 1,
-                                isAdd ? RGB(153, 190, 244) : (disabled ? RGB(220, 224, 230) : RGB(213, 219, 228)));
-        HGDIOBJ oldPen = SelectObject(item->hDC, border);
-        HGDIOBJ oldBrush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
-        RoundRect(item->hDC, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
-        SelectObject(item->hDC, oldBrush);
-        SelectObject(item->hDC, oldPen);
-        DeleteObject(border);
+        const COLORREF fill = disabled ? RGB(239, 242, 246) :
+            (selected ? RGB(224, 234, 248) : (hot ? RGB(235, 240, 246) : Ui::Surface));
+        const COLORREF border = isAdd ? RGB(137, 177, 237) :
+            (focused || hot ? Ui::BorderStrong : Ui::Border);
+        Ui::DrawRoundedRect(item->hDC, rect, fill, border, 12,
+                            isAdd ? PS_DASH : PS_SOLID);
         wchar_t text[512]{};
         GetWindowTextW(item->hwndItem, text, 512);
         SetBkMode(item->hDC, TRANSPARENT);
-        SetTextColor(item->hDC, disabled ? RGB(155, 160, 170) : (isAdd ? RGB(25, 111, 235) : RGB(25, 32, 42)));
+        SetTextColor(item->hDC, disabled ? RGB(155, 160, 170) : (isAdd ? Ui::Primary : Ui::Text));
         DrawTextW(item->hDC, text, -1, &rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         return TRUE;
     }

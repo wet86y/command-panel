@@ -19,6 +19,7 @@ public:
     void SetCallbacks(ClickCallback click, ContextCallback context);
     void SetButtons(const std::vector<CommandButton>& buttons);
     void SetBusy(bool busy);
+    void SetResizeSuspended(bool suspended);
     void Layout();
 
 private:
@@ -30,10 +31,12 @@ private:
 
     HWND hwnd_ = nullptr;
     HFONT font_ = nullptr;
+    UINT fontDpi_ = 0;
     std::vector<HWND> controls_;
     std::vector<bool> enabled_;
     ClickCallback clickCallback_;
     ContextCallback contextCallback_;
     bool busy_ = false;
+    bool resizeSuspended_ = false;
     int scrollPosition_ = 0;
 };
