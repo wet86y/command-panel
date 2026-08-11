@@ -8,6 +8,23 @@
 namespace {
 constexpr wchar_t HotProperty[] = L"CommandPanel.OwnerDrawHot";
 
+void DrawCheckMark(HDC dc, const RECT& box, UINT dpi)
+{
+    HPEN pen = CreatePen(PS_SOLID, std::max(1, Ui::Scale(2, dpi)), RGB(255, 255, 255));
+    HGDIOBJ previous = SelectObject(dc, pen);
+    MoveToEx(dc, box.left + Ui::Scale(4, dpi), box.top + Ui::Scale(9, dpi), nullptr);
+    LineTo(dc, box.left + Ui::Scale(8, dpi), box.bottom - Ui::Scale(5, dpi));
+    LineTo(dc, box.right - Ui::Scale(4, dpi), box.top + Ui::Scale(5, dpi));
+    SelectObject(dc, previous);
+    DeleteObject(pen);
+}
+
+void DrawFocusRing(HDC dc, RECT bounds, UINT dpi)
+{
+    InflateRect(&bounds, -Ui::Scale(2, dpi), -Ui::Scale(2, dpi));
+    Ui::DrawRoundedRect(dc, bounds, Ui::Primary, Ui::Primary, Ui::Scale(7, dpi));
+}
+
 LRESULT CALLBACK ButtonSubclass(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
                                 UINT_PTR, DWORD_PTR)
 {
@@ -85,6 +102,48 @@ void EnableRoundedCorners(HWND window)
     if (window == nullptr) return;
     const int preference = 2; // DWMWCP_ROUND, kept numeric for older SDK compatibility.
     DwmSetWindowAttribute(window, 33, &preference, sizeof(preference));
+}
+
+bool ToggleSelectable(bool& selected, bool enabled)
+{
+    if (!enabled) return false;
+    selected = !selected;
+    return true;
+}
+
+void DrawSelectableCheckBox(HDC dc, RECT bounds, std::wstring_view text,
+                            const SelectableVisual& visual)
+{
+    HBRUSH background = CreateSolidBrush(Window);
+    FillRect(dc, &bounds, background);
+    DeleteObject(background);
+    if (visual.focused && visual.enabled) DrawFocusRing(dc, bounds, visual.dpi);
+    const int available = static_cast<int>(std::min(bounds.right - bounds.left, bounds.bottom - bounds.top));
+    const int side = std::max(Scale(17, visual.dpi), available - Scale(4, visual.dpi));
+    RECT box{bounds.left + Scale(1, visual.dpi), (bounds.top + bounds.bottom - side) / 2,
+             bounds.left + Scale(1, visual.dpi) + side, (bounds.top + bounds.bottom + side) / 2};
+    const COLORREF fill = !visual.enabled ? RGB(238, 241, 245) : (visual.selected ? Primary : Window);
+    const COLORREF border = visual.selected ? Primary : (visual.hot || visual.focused ? Primary : Border);
+    DrawRoundedRect(dc, box, fill, border, Scale(4, visual.dpi));
+    if (visual.selected) DrawCheckMark(dc, box, visual.dpi);
+    RECT label{box.right + Scale(8, visual.dpi), bounds.top, bounds.right, bounds.bottom};
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, visual.enabled ? Text : TextMuted);
+    DrawTextW(dc, text.data(), static_cast<int>(text.size()), &label,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+void DrawSelectableOption(HDC dc, RECT bounds, std::wstring_view text,
+                          const SelectableVisual& visual, COLORREF selectedColor)
+{
+    const COLORREF fill = visual.selected ? selectedColor :
+        (!visual.enabled ? RGB(238, 241, 245) : (visual.pressed ? RGB(232, 237, 244) : (visual.hot ? SurfaceHover : Window)));
+    const COLORREF border = visual.selected ? selectedColor : BorderStrong;
+    DrawRoundedRect(dc, bounds, fill, border, Scale(7, visual.dpi));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, !visual.enabled ? TextMuted : (visual.selected ? RGB(255, 255, 255) : Text));
+    DrawTextW(dc, text.data(), static_cast<int>(text.size()), &bounds,
+              DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 }
 
 void TrackOwnerDrawButton(HWND button)

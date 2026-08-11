@@ -43,6 +43,7 @@ struct State
     CommandButton initial;
     CommandButton result;
     TerminalKind selectedTerminal = TerminalKind::PowerShell;
+    bool requireConfirmation{};
     std::wstring title;
     std::wstring messageText;
     std::wstring primaryText = L"保存";
@@ -163,7 +164,7 @@ void Accept(State& state)
     state.result.name = std::move(nameText);
     if (state.mode == DialogMode::Editor) {
         state.result.command = std::move(commandText);
-        state.result.confirm = IsDlgButtonChecked(state.window, IdConfirm) == BST_CHECKED;
+        state.result.confirm = state.requireConfirmation;
         state.result.terminal = state.selectedTerminal;
     }
     state.accepted = true;
@@ -193,38 +194,18 @@ void DrawButton(const State& state, const DRAWITEMSTRUCT& item)
     }
     if (item.CtlID == IdPowerShell || item.CtlID == IdWsl) {
         const TerminalKind kind = item.CtlID == IdWsl ? TerminalKind::Wsl : TerminalKind::PowerShell;
-        const bool checked = state.selectedTerminal == kind;
+        const Ui::SelectableVisual visual{!disabled, state.selectedTerminal == kind, pressed, hot,
+                                          (item.itemState & ODS_FOCUS) != 0, state.dpi};
         const COLORREF selectedColor = kind == TerminalKind::Wsl ? Ui::Success : Ui::Primary;
-        const COLORREF fill = checked ? selectedColor : (hot ? Ui::SurfaceHover : Ui::Window);
-        const COLORREF border = checked ? selectedColor : Ui::BorderStrong;
-        Ui::DrawRoundedRect(item.hDC, rect, fill, border, S(state, 7));
         wchar_t text[64]{}; GetWindowTextW(item.hwndItem, text, 64);
-        SetBkMode(item.hDC, TRANSPARENT);
-        SetTextColor(item.hDC, checked ? RGB(255,255,255) : Ui::Text);
-        DrawTextW(item.hDC, text, -1, &rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        Ui::DrawSelectableOption(item.hDC, rect, text, visual, selectedColor);
         return;
     }
     if (item.CtlID == IdConfirm) {
-        HBRUSH base = CreateSolidBrush(Ui::Window);
-        FillRect(item.hDC, &rect, base);
-        DeleteObject(base);
-        RECT box{rect.left + S(state, 1), rect.top + S(state, 5), rect.left + S(state, 19), rect.top + S(state, 23)};
-        const bool checked = (item.itemState & ODS_CHECKED) != 0 ||
-                             IsDlgButtonChecked(state.window, IdConfirm) == BST_CHECKED;
-        Ui::DrawRoundedRect(item.hDC, box, checked ? Ui::Primary : Ui::Window,
-                            checked ? Ui::Primary : (hot ? Ui::Primary : Ui::BorderStrong), S(state, 4));
-        if (checked) {
-            HPEN pen = CreatePen(PS_SOLID, S(state, 2), RGB(255,255,255));
-            HGDIOBJ old = SelectObject(item.hDC, pen);
-            MoveToEx(item.hDC, box.left + S(state, 4), box.top + S(state, 9), nullptr);
-            LineTo(item.hDC, box.left + S(state, 8), box.top + S(state, 13));
-            LineTo(item.hDC, box.left + S(state, 15), box.top + S(state, 5));
-            SelectObject(item.hDC, old); DeleteObject(pen);
-        }
         wchar_t text[128]{}; GetWindowTextW(item.hwndItem, text, 128);
-        RECT textRect{box.right + S(state, 9), rect.top, rect.right, rect.bottom};
-        SetBkMode(item.hDC, TRANSPARENT); SetTextColor(item.hDC, Ui::Text);
-        DrawTextW(item.hDC, text, -1, &textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        Ui::DrawSelectableCheckBox(item.hDC, rect, text,
+            Ui::SelectableVisual{!disabled, state.requireConfirmation, pressed, hot,
+                                 (item.itemState & ODS_FOCUS) != 0, state.dpi});
         return;
     }
     const bool primary = item.CtlID == IDOK;
@@ -281,20 +262,18 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL,
                                                  0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdCommand)), GetModuleHandleW(nullptr), nullptr);
                 state->confirm = CreateWindowExW(0, L"BUTTON", L"执行前再次确认",
-                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_OWNERDRAW,
+                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                                  0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdConfirm)), GetModuleHandleW(nullptr), nullptr);
-                CheckDlgButton(hwnd, IdConfirm, state->initial.confirm ? BST_CHECKED : BST_UNCHECKED);
+                state->requireConfirmation = state->initial.confirm;
                 Ui::TrackOwnerDrawButton(state->confirm);
                 state->terminalLabel = CreateWindowExW(0, L"STATIC", L"执行终端", WS_CHILD | WS_VISIBLE | SS_LEFT,
                                                         0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
                 state->powerShell = CreateWindowExW(0, L"BUTTON", L"PowerShell",
-                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_OWNERDRAW,
+                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                                      0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdPowerShell)), GetModuleHandleW(nullptr), nullptr);
                 state->wsl = CreateWindowExW(0, L"BUTTON", L"WSL",
-                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_OWNERDRAW,
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdWsl)), GetModuleHandleW(nullptr), nullptr);
-                CheckRadioButton(hwnd, IdPowerShell, IdWsl,
-                                 state->initial.terminal == TerminalKind::Wsl ? IdWsl : IdPowerShell);
                 state->selectedTerminal = state->initial.terminal;
                 Ui::TrackOwnerDrawButton(state->powerShell); Ui::TrackOwnerDrawButton(state->wsl);
             }
@@ -360,14 +339,12 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if (LOWORD(wParam) == IDOK) { Accept(*state); return 0; }
         if (LOWORD(wParam) == IDCANCEL || LOWORD(wParam) == IdClose) { DestroyWindow(hwnd); return 0; }
         if (LOWORD(wParam) == IdConfirm && HIWORD(wParam) == BN_CLICKED) {
-            const UINT next = IsDlgButtonChecked(hwnd, IdConfirm) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED;
-            CheckDlgButton(hwnd, IdConfirm, next);
-            InvalidateRect(state->confirm, nullptr, FALSE);
+            if (Ui::ToggleSelectable(state->requireConfirmation, IsWindowEnabled(state->confirm) != FALSE))
+                InvalidateRect(state->confirm, nullptr, FALSE);
             return 0;
         }
         if ((LOWORD(wParam) == IdPowerShell || LOWORD(wParam) == IdWsl) && HIWORD(wParam) == BN_CLICKED) {
             state->selectedTerminal = LOWORD(wParam) == IdWsl ? TerminalKind::Wsl : TerminalKind::PowerShell;
-            CheckRadioButton(hwnd, IdPowerShell, IdWsl, LOWORD(wParam));
             InvalidateRect(state->powerShell, nullptr, FALSE);
             InvalidateRect(state->wsl, nullptr, FALSE);
             return 0;

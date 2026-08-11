@@ -30,6 +30,72 @@ void Check(bool condition, const char* message)
     std::cerr << "FAILED: " << message << '\n';
 }
 
+bool ownerDrawSelection{};
+
+LRESULT CALLBACK OwnerDrawSelectionHost(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == 701) {
+        Ui::ToggleSelectable(ownerDrawSelection);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+void TestOwnerDrawSelectableInteraction()
+{
+    ownerDrawSelection = false;
+    Check(Ui::ToggleSelectable(ownerDrawSelection) && ownerDrawSelection,
+          "enabled selectable state should toggle on");
+    Check(Ui::ToggleSelectable(ownerDrawSelection) && !ownerDrawSelection,
+          "enabled selectable state should toggle off");
+    Check(!Ui::ToggleSelectable(ownerDrawSelection, false) && !ownerDrawSelection,
+          "disabled selectable state must not change");
+
+    constexpr wchar_t className[] = L"CommandPanelOwnerDrawSelectionTest";
+    WNDCLASSW windowClass{};
+    windowClass.lpfnWndProc = OwnerDrawSelectionHost;
+    windowClass.hInstance = GetModuleHandleW(nullptr);
+    windowClass.lpszClassName = className;
+    if (!RegisterClassW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        Check(false, "owner-draw selectable host class should register");
+        return;
+    }
+    HWND host = CreateWindowExW(0, className, L"", WS_OVERLAPPED,
+                                0, 0, 160, 80, nullptr, nullptr, windowClass.hInstance, nullptr);
+    HWND control = host == nullptr ? nullptr : CreateWindowExW(0, L"BUTTON", L"Selectable",
+        WS_CHILD | BS_OWNERDRAW, 0, 0, 140, 28, host,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(701)), windowClass.hInstance, nullptr);
+    Check(control != nullptr, "owner-draw selectable control should be created without a system checkbox style");
+    if (control != nullptr) SendMessageW(control, BM_CLICK, 0, 0);
+    Check(ownerDrawSelection, "real owner-draw button click should reach the explicit selection state handler");
+    if (host != nullptr) DestroyWindow(host);
+}
+
+std::string ReadTextFile(const std::filesystem::path& path)
+{
+    std::ifstream stream(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+}
+
+void TestNoNativeSelectionProtocolInOwnerDrawSource()
+{
+    const std::filesystem::path sourceDirectory = std::filesystem::path(__FILE__).parent_path().parent_path() / L"src";
+    const std::vector<std::string> forbidden{
+        "BS_AUTOCHECKBOX", "BS_AUTORADIOBUTTON", "BS_CHECKBOX", "BM_GETCHECK", "BM_SETCHECK",
+        "CheckDlgButton", "CheckRadioButton", "ODS_CHECKED"};
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(sourceDirectory, error)) {
+        Check(!error, "source directory should be available for the owner-draw structure gate");
+        if (error) break;
+        if (!entry.is_regular_file() || entry.path().extension() != L".cpp") continue;
+        const std::string text = ReadTextFile(entry.path());
+        for (const std::string& token : forbidden) {
+            Check(text.find(token) == std::string::npos,
+                  "owner-draw sources must not reintroduce the native checkbox or radio protocol");
+        }
+    }
+}
+
 void TestThumbCalculation()
 {
     UiScroll::Metrics metrics{0, 999, 100, 0};
@@ -153,6 +219,7 @@ void TestAboutButtonNoBlackBorder()
             {AboutButtonKind::Secondary, true, false, true, true, false, dpi},
             {AboutButtonKind::Secondary, false, false, false, false, false, dpi},
             {AboutButtonKind::Link, true, false, true, true, false, dpi},
+            {AboutButtonKind::CheckBox, true, false, false, false, false, dpi},
             {AboutButtonKind::CheckBox, true, false, true, true, true, dpi},
             {AboutButtonKind::CheckBox, false, false, false, false, false, dpi},
         };
@@ -375,6 +442,8 @@ void TestConfigV3Migration()
 int wmain()
 {
     const bool bufferedPaintInitialized = SUCCEEDED(BufferedPaintInit());
+    TestOwnerDrawSelectableInteraction();
+    TestNoNativeSelectionProtocolInOwnerDrawSource();
     TestThumbCalculation();
     TestWheelAccumulation();
     TestButtonLayout();

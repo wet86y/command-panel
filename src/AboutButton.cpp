@@ -11,16 +11,6 @@ void DrawFocusRing(HDC dc, RECT bounds, UINT dpi)
     Ui::DrawRoundedRect(dc, bounds, Ui::Primary, Ui::Primary, Ui::Scale(7, dpi));
 }
 
-void DrawCheckMark(HDC dc, const RECT& box, UINT dpi)
-{
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, Ui::Scale(2, dpi)), RGB(255, 255, 255));
-    HGDIOBJ previous = SelectObject(dc, pen);
-    MoveToEx(dc, box.left + Ui::Scale(4, dpi), box.top + Ui::Scale(9, dpi), nullptr);
-    LineTo(dc, box.left + Ui::Scale(8, dpi), box.bottom - Ui::Scale(5, dpi));
-    LineTo(dc, box.right - Ui::Scale(4, dpi), box.top + Ui::Scale(5, dpi));
-    SelectObject(dc, previous);
-    DeleteObject(pen);
-}
 }
 
 void FillAboutButtonBackground(HDC dc, const RECT& bounds)
@@ -47,19 +37,8 @@ void DrawAboutButton(HDC dc, RECT bounds, std::wstring_view text,
     }
 
     if (visual.kind == AboutButtonKind::CheckBox) {
-        const int available = static_cast<int>(std::min(bounds.right - bounds.left, bounds.bottom - bounds.top));
-        const int side = std::max(Ui::Scale(17, visual.dpi), available - Ui::Scale(4, visual.dpi));
-        RECT box{bounds.left + Ui::Scale(1, visual.dpi), (bounds.top + bounds.bottom - side) / 2,
-                 bounds.left + Ui::Scale(1, visual.dpi) + side, (bounds.top + bounds.bottom + side) / 2};
-        const COLORREF fill = !visual.enabled ? RGB(238, 241, 245) : (visual.checked ? Ui::Primary : Ui::Window);
-        const COLORREF border = visual.checked ? Ui::Primary : (visual.hot || visual.focused ? Ui::Primary : Ui::Border);
-        Ui::DrawRoundedRect(dc, box, fill, border, Ui::Scale(4, visual.dpi));
-        if (visual.checked) DrawCheckMark(dc, box, visual.dpi);
-        RECT label{box.right + Ui::Scale(8, visual.dpi), bounds.top, bounds.right, bounds.bottom};
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, visual.enabled ? Ui::Text : Ui::TextMuted);
-        DrawTextW(dc, text.data(), static_cast<int>(text.size()), &label,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        Ui::DrawSelectableCheckBox(dc, bounds, text,
+            Ui::SelectableVisual{visual.enabled, visual.checked, visual.pressed, visual.hot, visual.focused, visual.dpi});
         return;
     }
 

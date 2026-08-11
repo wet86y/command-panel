@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <string_view>
+
 namespace Ui {
 
 constexpr COLORREF Window = RGB(255, 255, 255);
@@ -19,6 +21,17 @@ constexpr COLORREF Danger = RGB(210, 42, 55);
 constexpr COLORREF Terminal = RGB(10, 16, 22);
 constexpr COLORREF TerminalText = RGB(226, 232, 240);
 
+// Owner-drawn BUTTON controls do not support the native checkbox/radio state
+// protocol.  Selected state therefore always belongs to the caller.
+struct SelectableVisual {
+    bool enabled{true};
+    bool selected{};
+    bool pressed{};
+    bool hot{};
+    bool focused{};
+    UINT dpi{96};
+};
+
 int Scale(int value, UINT dpi);
 int CompactScale(int value, UINT dpi);
 HFONT CreateFont(UINT dpi, int pointSize, int weight = FW_NORMAL,
@@ -27,6 +40,12 @@ void DrawRoundedRect(HDC dc, RECT rect, COLORREF fill, COLORREF border, int radi
                      int penStyle = PS_SOLID);
 void ApplyRoundedRegion(HWND window, int width, int height, int radius);
 void EnableRoundedCorners(HWND window);
+
+bool ToggleSelectable(bool& selected, bool enabled = true);
+void DrawSelectableCheckBox(HDC dc, RECT bounds, std::wstring_view text,
+                            const SelectableVisual& visual);
+void DrawSelectableOption(HDC dc, RECT bounds, std::wstring_view text,
+                          const SelectableVisual& visual, COLORREF selectedColor);
 
 void TrackOwnerDrawButton(HWND button);
 bool IsControlHot(HWND control);

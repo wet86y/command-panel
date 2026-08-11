@@ -110,8 +110,8 @@ bool AboutWindow::CreateControls()
         return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | style,
             0, 0, 1, 1, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
     };
-    const auto makeButton = [this](const wchar_t* text, int id, DWORD extra = 0) {
-        HWND control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | extra,
+    const auto makeButton = [this](const wchar_t* text, int id) {
+        HWND control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             0, 0, 1, 1, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         Ui::TrackOwnerDrawButton(control);
         return control;
@@ -130,7 +130,7 @@ bool AboutWindow::CreateControls()
     pauseResume_ = makeButton(L"暂停下载", IdAboutPauseResume);
     background_ = makeButton(L"后台下载", IdAboutBackground);
     cancel_ = makeButton(L"取消", IdAboutCancel);
-    acceleration_ = makeButton(L"使用加速节点", IdAboutAcceleration, BS_AUTOCHECKBOX);
+    acceleration_ = makeButton(L"使用加速节点", IdAboutAcceleration);
     nextNode_ = makeButton(L"切换加速节点", IdAboutNextNode);
     install_ = makeButton(L"立即安装", IdAboutInstall);
     return title_ && version_ && developer_ && repository_ && status_ && notes_ && check_ && download_ && pauseResume_ &&
@@ -205,7 +205,7 @@ void AboutWindow::UpdateControls()
     SetVisible(notes_, available || transfer || completed || failed);
     EnableWindow(check_, state_.presentation != AboutPresentation::Checking);
     EnableWindow(nextNode_, state_.acceleration);
-    SendMessageW(acceleration_, BM_SETCHECK, state_.acceleration ? BST_CHECKED : BST_UNCHECKED, 0);
+    InvalidateRect(acceleration_, nullptr, FALSE);
     InvalidateRect(hwnd_, &layout_.progress, FALSE);
 }
 
@@ -225,8 +225,7 @@ void AboutWindow::DrawButton(const DRAWITEMSTRUCT& item) const
     visual.pressed = (item.itemState & ODS_SELECTED) != 0;
     visual.hot = Ui::IsControlHot(item.hwndItem);
     visual.focused = (item.itemState & ODS_FOCUS) != 0;
-    visual.checked = (item.itemState & ODS_CHECKED) != 0 ||
-                     (id == IdAboutAcceleration && SendMessageW(item.hwndItem, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    visual.checked = id == IdAboutAcceleration && state_.acceleration;
     visual.dpi = GetDpiForWindow(hwnd_);
     const HFONT font = reinterpret_cast<HFONT>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0));
     HGDIOBJ old = font != nullptr ? SelectObject(dc, font) : nullptr;
@@ -353,7 +352,10 @@ LRESULT AboutWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         case IdAboutCancel: coordinator_->Cancel(); return 0;
         case IdAboutAcceleration:
-            coordinator_->SetAcceleration(SendMessageW(acceleration_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (Ui::ToggleSelectable(state_.acceleration, IsWindowEnabled(acceleration_) != FALSE)) {
+                InvalidateRect(acceleration_, nullptr, FALSE);
+                coordinator_->SetAcceleration(state_.acceleration);
+            }
             return 0;
         case IdAboutNextNode: coordinator_->NextNode(); return 0;
         case IdAboutInstall: coordinator_->Install(); return 0;
