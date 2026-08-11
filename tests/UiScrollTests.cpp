@@ -6,9 +6,11 @@
 #include "AboutButton.h"
 #include "AboutLayout.h"
 #include "ExecutableNameNormalizer.h"
+#include "LocalUpdateDiagnostics.h"
 #include "UiTheme.h"
 
 #include <richedit.h>
+#include <uxtheme.h>
 
 #include <cstdlib>
 #include <iostream>
@@ -144,10 +146,7 @@ void TestAboutButtonNoBlackBorder()
         HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
         HGDIOBJ old = SelectObject(dc, bitmap);
         const RECT full{0, 0, 180, 72};
-        HBRUSH background = CreateSolidBrush(Ui::Surface);
-        FillRect(dc, &full, background);
-        DeleteObject(background);
-        const RECT bounds{24, 18, 156, 54};
+        const RECT bounds = full; // owner-draw passes the whole button client rect.
         const std::vector<AboutButtonVisual> visuals{
             {AboutButtonKind::Primary, true, false, false, false, false, dpi},
             {AboutButtonKind::Primary, true, true, true, true, false, dpi},
@@ -158,10 +157,19 @@ void TestAboutButtonNoBlackBorder()
             {AboutButtonKind::CheckBox, false, false, false, false, false, dpi},
         };
         for (const auto& visual : visuals) {
-            FillRect(dc, &full, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
-            DrawAboutButton(dc, bounds, L"", visual);
+            HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
+            FillRect(dc, &full, black);
+            DeleteObject(black);
+            HDC bufferedDc = nullptr;
+            HPAINTBUFFER buffer = BeginBufferedPaint(dc, &full, BPBF_COMPATIBLEBITMAP, nullptr, &bufferedDc);
+            DrawAboutButton(buffer != nullptr ? bufferedDc : dc, bounds, L"", visual);
+            if (buffer != nullptr) EndBufferedPaint(buffer, TRUE);
             const int inset = std::max(16, Ui::Scale(18, dpi));
             const POINT samples[]{
+                {bounds.left, bounds.top},
+                {bounds.right - 1, bounds.top},
+                {bounds.left, bounds.bottom - 1},
+                {bounds.right - 1, bounds.bottom - 1},
                 {(bounds.left + bounds.right) / 2, bounds.top},
                 {(bounds.left + bounds.right) / 2, bounds.bottom - 1},
                 {bounds.left, (bounds.top + bounds.bottom) / 2},
@@ -366,17 +374,20 @@ void TestConfigV3Migration()
 
 int wmain()
 {
+    const bool bufferedPaintInitialized = SUCCEEDED(BufferedPaintInit());
     TestThumbCalculation();
     TestWheelAccumulation();
     TestButtonLayout();
     TestAboutLayout();
     TestAboutButtonNoBlackBorder();
     TestExecutableNameNormalizationTarget();
+    Check(!LocalUpdateDiagnosticsEnabled(), "test and release targets must not enable local update diagnostics");
     TestRealEditControls();
     TestTerminalModel();
     TestTerminalInputEncoding();
     TestTerminalUtf8Streaming();
     TestConfigV3Migration();
+    if (bufferedPaintInitialized) BufferedPaintUnInit();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;

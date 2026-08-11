@@ -1,6 +1,7 @@
 #include "App.h"
 
 #include "ExecutableNameNormalizer.h"
+#include "LocalUpdateDiagnostics.h"
 #include "Utf.h"
 #include "Version.h"
 
@@ -9,8 +10,10 @@
 #include <shellapi.h>
 #include <uxtheme.h>
 
-#include <optional>
+#include <chrono>
 #include <filesystem>
+#include <optional>
+#include <thread>
 
 namespace {
 bool IsElevated()
@@ -60,11 +63,29 @@ bool WriteUpdateHealthMarker(const std::wstring& marker)
     }
 }
 
+// The update Stub owns its transaction directory.  A process started with an
+// update-health marker must acknowledge the outer update before it starts the
+// independent name-normalisation Stub, otherwise both helpers can race on the
+// same executable path.
+bool WaitForOuterUpdateTransaction(const std::wstring& marker, std::stop_token stopToken)
+{
+    const std::filesystem::path path(marker);
+    const ULONGLONG deadline = GetTickCount64() + 35000;
+    for (;;) {
+        if (stopToken.stop_requested()) return false;
+        std::error_code error;
+        const bool present = std::filesystem::exists(path, error);
+        if (!present && !error) return true;
+        if (GetTickCount64() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+}
+
 bool VerifyReleaseBundle(HINSTANCE instance)
 {
     HRSRC version = FindResourceW(instance, MAKEINTRESOURCEW(1), RT_VERSION);
     HRSRC stub = FindResourceW(instance, MAKEINTRESOURCEW(201), RT_RCDATA);
-    if (version == nullptr || stub == nullptr || SizeofResource(instance, stub) < 2) return false;
+    if (LocalUpdateDiagnosticsEnabled() || version == nullptr || stub == nullptr || SizeofResource(instance, stub) < 2) return false;
     HGLOBAL loaded = LoadResource(instance, stub);
     const auto* bytes = loaded != nullptr ? static_cast<const unsigned char*>(LockResource(loaded)) : nullptr;
     return bytes != nullptr && bytes[0] == 'M' && bytes[1] == 'Z';
@@ -115,10 +136,13 @@ int App::Run(HINSTANCE instance, int showCommand)
 {
     const StartupRequest startup = ParseStartupRequest();
     if (startup.verifyRelease) return VerifyReleaseBundle(instance) ? 0 : 10;
+    RecordLocalUpdateDiagnostic(L"startup path=" + CurrentExecutablePath().wstring() +
+                                L" update-health=" + (startup.updateHealthMarker ? L"present" : L"absent"));
     const auto normalizeExecutableName = [instance] {
         std::wstring error;
         const auto result = NormalizeExecutableName(instance, CurrentExecutablePath(), L"快捷控制台.exe", error);
-        (void)error; // Name normalization is deliberately non-blocking.
+        if (result == ExecutableNameNormalizationResult::Failed)
+            RecordLocalUpdateDiagnostic(L"rename hand-off failed error=" + error);
         return result;
     };
     // A release asset launched normally can rename before window creation.  An
@@ -138,25 +162,47 @@ int App::Run(HINSTANCE instance, int showCommand)
         return 1;
     }
     if (startup.updateHealthMarker && !WriteUpdateHealthMarker(*startup.updateHealthMarker)) {
+        RecordLocalUpdateDiagnostic(L"update health marker failed path=" + *startup.updateHealthMarker);
         MessageBoxW(window.Hwnd(), L"更新后的启动健康标记写入失败，更新助手将回滚到上一版本。",
                     L"快捷控制台", MB_OK | MB_ICONERROR);
         if (bufferedPaintInitialized) BufferedPaintUnInit();
         if (SUCCEEDED(comResult)) CoUninitialize();
         return 2;
     }
-    if (startup.updateHealthMarker && normalizeExecutableName() == ExecutableNameNormalizationResult::RelaunchStarted) {
-        if (bufferedPaintInitialized) BufferedPaintUnInit();
-        if (SUCCEEDED(comResult)) CoUninitialize();
-        return 0;
-    }
     ShowWindow(window.Hwnd(), showCommand);
     UpdateWindow(window.Hwnd());
+    std::jthread updateRenameThread;
+    if (startup.updateHealthMarker) {
+        const std::wstring marker = *startup.updateHealthMarker;
+        const HWND updateWindow = window.Hwnd();
+        RecordLocalUpdateDiagnostic(L"update health marker written path=" + marker);
+        updateRenameThread = std::jthread([instance, marker, updateWindow](std::stop_token stopToken) {
+            if (!WaitForOuterUpdateTransaction(marker, stopToken)) {
+                if (!stopToken.stop_requested())
+                    RecordLocalUpdateDiagnostic(L"update hand-off wait timed out; deferring rename to the next launch");
+                return;
+            }
+            RecordLocalUpdateDiagnostic(L"outer update transaction completed; starting rename hand-off");
+            std::wstring error;
+            const auto result = NormalizeExecutableName(instance, CurrentExecutablePath(), L"快捷控制台.exe", error);
+            if (result == ExecutableNameNormalizationResult::RelaunchStarted) {
+                RecordLocalUpdateDiagnostic(L"rename hand-off started after update transaction completed");
+                if (IsWindow(updateWindow)) PostMessageW(updateWindow, WM_CLOSE, 0, 0);
+            } else if (result == ExecutableNameNormalizationResult::Failed) {
+                RecordLocalUpdateDiagnostic(L"rename hand-off failed after update transaction error=" + error);
+            }
+        });
+    }
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
     const int result = static_cast<int>(message.wParam);
+    if (updateRenameThread.joinable()) {
+        updateRenameThread.request_stop();
+        updateRenameThread.join();
+    }
     if (bufferedPaintInitialized) BufferedPaintUnInit();
     if (SUCCEEDED(comResult)) CoUninitialize();
     return result;

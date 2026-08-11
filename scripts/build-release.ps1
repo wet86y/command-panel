@@ -17,7 +17,7 @@ if ($Clean -and (Test-Path -LiteralPath $BuildRoot)) {
     Remove-Item -LiteralPath $BuildRoot -Recurse -Force
 }
 
-$Command = 'call "{0}" -arch=x64 -host_arch=x64 && "{1}" -S "{2}" -B "{3}" -G "Visual Studio 18 2026" -A x64 -DBUILD_TESTING=ON && "{1}" --build "{3}" --config Release --parallel && "{4}" --test-dir "{3}" -C Release --output-on-failure' -f $VsDevCmd, $CMake, $ProjectRoot, $BuildRoot, $CTest
+$Command = 'call "{0}" -arch=x64 -host_arch=x64 && "{1}" -S "{2}" -B "{3}" -G "Visual Studio 18 2026" -A x64 -DBUILD_TESTING=ON -DCOMMAND_PANEL_LOCAL_UPDATE_DIAGNOSTICS=OFF && "{1}" --build "{3}" --config Release --parallel && "{4}" --test-dir "{3}" -C Release --output-on-failure' -f $VsDevCmd, $CMake, $ProjectRoot, $BuildRoot, $CTest
 cmd.exe /c $Command
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

@@ -1,10 +1,15 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(CommandPanel VERSION 1.0.2 LANGUAGES CXX RC)
+project(CommandPanel VERSION 1.0.3 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# This is deliberately opt-in and cannot be present in the published Release
+# binary.  It is only used while reproducing an updater hand-off locally.
+option(COMMAND_PANEL_LOCAL_UPDATE_DIAGNOSTICS
+    "Enable local-only update hand-off diagnostics outside Release" OFF)
 
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/DesktopUpdateKit/native"
     "${CMAKE_BINARY_DIR}/desktop-update-kit")
@@ -37,6 +42,7 @@ add_executable(CommandPanel WIN32
     src/AboutButton.cpp
     src/AboutWindow.cpp
     src/ExecutableNameNormalizer.cpp
+    src/LocalUpdateDiagnostics.cpp
     src/UpdateCoordinator.cpp
     src/Utf.cpp
     src/UiTheme.cpp
@@ -57,6 +63,8 @@ target_compile_definitions(CommandPanel PRIVATE
     _UNICODE
     _WIN32_WINNT=0x0A00
     NOMINMAX
+    $<$<AND:$<BOOL:${COMMAND_PANEL_LOCAL_UPDATE_DIAGNOSTICS}>,$<NOT:$<CONFIG:Release>>>:COMMAND_PANEL_LOCAL_UPDATE_DIAGNOSTICS=1>
+    $<$<OR:$<NOT:$<BOOL:${COMMAND_PANEL_LOCAL_UPDATE_DIAGNOSTICS}>>,$<CONFIG:Release>>:COMMAND_PANEL_LOCAL_UPDATE_DIAGNOSTICS=0>
 )
 
 target_compile_options(CommandPanel PRIVATE
@@ -104,19 +112,34 @@ if(BUILD_TESTING)
         src/ConfigManager.cpp
         src/Utf.cpp
         src/AboutLayout.cpp
-        src/AboutButton.cpp
-        src/ExecutableNameNormalizer.cpp
-    )
+    src/AboutButton.cpp
+    src/ExecutableNameNormalizer.cpp
+    src/LocalUpdateDiagnostics.cpp
+)
     target_include_directories(CommandPanelUiTests PRIVATE src "${COMMAND_PANEL_GENERATED_DIR}")
     target_compile_definitions(CommandPanelUiTests PRIVATE
         UNICODE
         _UNICODE
         _WIN32_WINNT=0x0A00
         NOMINMAX
+        COMMAND_PANEL_LOCAL_UPDATE_DIAGNOSTICS=0
     )
     target_compile_options(CommandPanelUiTests PRIVATE /utf-8 /W4 /permissive-)
     set_property(TARGET CommandPanelUiTests PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    target_link_libraries(CommandPanelUiTests PRIVATE user32 gdi32 comctl32 dwmapi crypt32 shell32 ole32 desktop_update_kit_native)
+    target_link_libraries(CommandPanelUiTests PRIVATE user32 gdi32 comctl32 dwmapi crypt32 shell32 ole32 uxtheme desktop_update_kit_native)
     add_test(NAME CommandPanelUiTests COMMAND CommandPanelUiTests)
+
+    add_executable(CommandPanelUpdateHandoffTest
+        tests/UpdateHandoffIntegration.cpp
+        "${COMMAND_PANEL_GENERATED_DIR}/$<CONFIG>/updater_stub.rc"
+    )
+    target_include_directories(CommandPanelUpdateHandoffTest PRIVATE src "${COMMAND_PANEL_GENERATED_DIR}")
+    target_compile_definitions(CommandPanelUpdateHandoffTest PRIVATE
+        UNICODE _UNICODE _WIN32_WINNT=0x0A00 NOMINMAX COMMAND_PANEL_LOCAL_UPDATE_DIAGNOSTICS=0)
+    target_compile_options(CommandPanelUpdateHandoffTest PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    set_property(TARGET CommandPanelUpdateHandoffTest PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_link_libraries(CommandPanelUpdateHandoffTest PRIVATE user32 desktop_update_kit_native)
+    add_dependencies(CommandPanelUpdateHandoffTest DesktopUpdateKitUpdaterStub)
 endif()

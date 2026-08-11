@@ -1,5 +1,6 @@
 #include "UpdateCoordinator.h"
 
+#include "LocalUpdateDiagnostics.h"
 #include "Version.h"
 
 #include <algorithm>
@@ -172,7 +173,10 @@ bool UpdateCoordinator::Install()
 {
     const auto snapshot = session_.snapshot();
     if (snapshot.state != desktop_update_kit::SessionState::completed || snapshot.downloaded_path.empty() ||
-        !snapshot.release || snapshot.release->sha256.empty()) return false;
+        !snapshot.release || snapshot.release->sha256.empty()) {
+        RecordLocalUpdateDiagnostic(L"install rejected stage=precondition");
+        return false;
+    }
     auto launching = State();
     launching.presentation = AboutPresentation::Launching;
     launching.status = L"更新助手已启动，快捷控制台即将退出。";
@@ -183,8 +187,11 @@ bool UpdateCoordinator::Install()
         failed.presentation = AboutPresentation::Failed;
         failed.status = L"内嵌更新助手不可用。";
         Publish(failed);
+        RecordLocalUpdateDiagnostic(L"install failed stage=load-stub");
         return false;
     }
+    RecordLocalUpdateDiagnostic(L"install requested target=" + std::filesystem::absolute(executable_).wstring() +
+                                L" downloaded=" + snapshot.downloaded_path.wstring());
     const auto result = desktop_update_kit::launch_update(stub, snapshot.downloaded_path,
         std::filesystem::absolute(executable_), snapshot.release->sha256,
         static_cast<int>(GetCurrentProcessId()));
@@ -193,12 +200,14 @@ bool UpdateCoordinator::Install()
         failed.presentation = AboutPresentation::Failed;
         failed.status = L"无法启动更新助手：" + Widen(result.error);
         Publish(failed);
+        RecordLocalUpdateDiagnostic(L"install failed stage=launch-stub error=" + Widen(result.error));
         return false;
     }
     {
         std::scoped_lock lock(mutex_);
         installationStarted_ = true;
     }
+    RecordLocalUpdateDiagnostic(L"install started stub-bytes=" + std::to_wstring(stub.size()));
     if (exitCallback_) exitCallback_();
     return true;
 }

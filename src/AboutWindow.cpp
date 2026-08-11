@@ -117,7 +117,8 @@ bool AboutWindow::CreateControls()
         return control;
     };
     title_ = makeStatic(L"快捷控制台", IdAboutTitle, SS_LEFT | SS_CENTERIMAGE);
-    version_ = makeStatic(L"版本 1.0.1", IdAboutVersion, SS_LEFT | SS_CENTERIMAGE);
+    const std::wstring versionText = L"版本 " + std::wstring(kCommandPanelVersion);
+    version_ = makeStatic(versionText.c_str(), IdAboutVersion, SS_LEFT | SS_CENTERIMAGE);
     developer_ = makeStatic(L"开发者：wet86y · Apache-2.0", IdAboutDeveloper, SS_LEFT | SS_CENTERIMAGE);
     repository_ = makeButton(L"GitHub 项目仓库与更新记录", IdAboutRepository);
     status_ = makeStatic(L"", IdAboutStatus, SS_LEFT);

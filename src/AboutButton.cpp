@@ -23,9 +23,17 @@ void DrawCheckMark(HDC dc, const RECT& box, UINT dpi)
 }
 }
 
+void FillAboutButtonBackground(HDC dc, const RECT& bounds)
+{
+    HBRUSH background = CreateSolidBrush(Ui::Window);
+    FillRect(dc, &bounds, background);
+    DeleteObject(background);
+}
+
 void DrawAboutButton(HDC dc, RECT bounds, std::wstring_view text,
                      const AboutButtonVisual& visual)
 {
+    FillAboutButtonBackground(dc, bounds);
     const int radius = Ui::Scale(7, visual.dpi);
     const bool interactive = visual.enabled && visual.kind != AboutButtonKind::Link;
     if (visual.focused && visual.enabled) DrawFocusRing(dc, bounds, visual.dpi);
@@ -39,9 +47,6 @@ void DrawAboutButton(HDC dc, RECT bounds, std::wstring_view text,
     }
 
     if (visual.kind == AboutButtonKind::CheckBox) {
-        HBRUSH background = CreateSolidBrush(Ui::Window);
-        FillRect(dc, &bounds, background);
-        DeleteObject(background);
         const int available = static_cast<int>(std::min(bounds.right - bounds.left, bounds.bottom - bounds.top));
         const int side = std::max(Ui::Scale(17, visual.dpi), available - Ui::Scale(4, visual.dpi));
         RECT box{bounds.left + Ui::Scale(1, visual.dpi), (bounds.top + bounds.bottom - side) / 2,
