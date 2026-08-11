@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(CommandPanel VERSION 1.0.0 LANGUAGES CXX RC)
+project(CommandPanel VERSION 1.0.1 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,7 +34,9 @@ add_executable(CommandPanel WIN32
     src/TerminalView.cpp
     src/CommandExecutor.cpp
     src/AboutLayout.cpp
+    src/AboutButton.cpp
     src/AboutWindow.cpp
+    src/ExecutableNameNormalizer.cpp
     src/UpdateCoordinator.cpp
     src/Utf.cpp
     src/UiTheme.cpp
@@ -102,6 +104,8 @@ if(BUILD_TESTING)
         src/ConfigManager.cpp
         src/Utf.cpp
         src/AboutLayout.cpp
+        src/AboutButton.cpp
+        src/ExecutableNameNormalizer.cpp
     )
     target_include_directories(CommandPanelUiTests PRIVATE src "${COMMAND_PANEL_GENERATED_DIR}")
     target_compile_definitions(CommandPanelUiTests PRIVATE
@@ -111,6 +115,8 @@ if(BUILD_TESTING)
         NOMINMAX
     )
     target_compile_options(CommandPanelUiTests PRIVATE /utf-8 /W4 /permissive-)
-    target_link_libraries(CommandPanelUiTests PRIVATE user32 gdi32 comctl32 dwmapi crypt32 shell32 ole32)
+    set_property(TARGET CommandPanelUiTests PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_link_libraries(CommandPanelUiTests PRIVATE user32 gdi32 comctl32 dwmapi crypt32 shell32 ole32 desktop_update_kit_native)
     add_test(NAME CommandPanelUiTests COMMAND CommandPanelUiTests)
 endif()

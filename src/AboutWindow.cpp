@@ -1,5 +1,6 @@
 #include "AboutWindow.h"
 
+#include "AboutButton.h"
 #include "UiTheme.h"
 #include "Version.h"
 
@@ -7,11 +8,12 @@
 #include <uxtheme.h>
 
 #include <algorithm>
+#include <memory>
 #include <string>
 
 namespace {
 constexpr int IdAboutTitle = 3101;
-constexpr int IdAboutCurrentVersion = 3102;
+constexpr int IdAboutVersion = 3102;
 constexpr int IdAboutDeveloper = 3103;
 constexpr int IdAboutStatus = 3104;
 constexpr int IdAboutNotes = 3105;
@@ -45,7 +47,7 @@ void SetVisible(HWND control, bool visible)
 
 bool IsPrimaryButton(int id)
 {
-    return id == IdAboutCheck || id == IdAboutDownload || id == IdAboutInstall;
+    return id == IdAboutDownload || id == IdAboutInstall;
 }
 }
 
@@ -54,6 +56,7 @@ AboutWindow::~AboutWindow()
     if (hwnd_ != nullptr) DestroyWindow(hwnd_);
     if (titleFont_ != nullptr) DeleteObject(titleFont_);
     if (bodyFont_ != nullptr) DeleteObject(bodyFont_);
+    if (surfaceBrush_ != nullptr) DeleteObject(surfaceBrush_);
 }
 
 void AboutWindow::Show(HWND owner, HINSTANCE instance, UpdateCoordinator& coordinator)
@@ -78,12 +81,13 @@ bool AboutWindow::Create(HWND owner, HINSTANCE instance, UpdateCoordinator& coor
     instance_ = instance;
     coordinator_ = &coordinator;
     const UINT dpi = GetDpiForWindow(owner);
-    const auto initial = CalculateAboutLayout(Ui::Scale(640, dpi), Ui::Scale(570, dpi), dpi, AboutPresentation::Idle);
-    hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME, className, L"关于快捷控制台",
+    const auto initial = CalculateAboutLayout(Ui::Scale(620, dpi), Ui::Scale(560, dpi), dpi, AboutPresentation::Idle);
+    hwnd_ = CreateWindowExW(0, className, L"关于快捷控制台",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME,
-        CW_USEDEFAULT, CW_USEDEFAULT, initial.minimumWidth + Ui::Scale(120, dpi),
-        initial.minimumHeight + Ui::Scale(40, dpi), owner, nullptr, instance, this);
+        CW_USEDEFAULT, CW_USEDEFAULT, initial.minimumWidth + Ui::Scale(110, dpi),
+        initial.minimumHeight + Ui::Scale(32, dpi), owner, nullptr, instance, this);
     if (hwnd_ == nullptr) return false;
+    surfaceBrush_ = CreateSolidBrush(Ui::Surface);
     Ui::EnableRoundedCorners(hwnd_);
     if (!CreateControls()) {
         DestroyWindow(hwnd_);
@@ -107,27 +111,29 @@ bool AboutWindow::CreateControls()
             0, 0, 1, 1, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
     };
     const auto makeButton = [this](const wchar_t* text, int id, DWORD extra = 0) {
-        return CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | extra,
+        HWND control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | extra,
             0, 0, 1, 1, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+        Ui::TrackOwnerDrawButton(control);
+        return control;
     };
     title_ = makeStatic(L"快捷控制台", IdAboutTitle, SS_LEFT | SS_CENTERIMAGE);
-    currentVersion_ = makeStatic(L"当前版本：1.0.0", IdAboutCurrentVersion, SS_LEFT | SS_CENTERIMAGE);
-    developer_ = makeStatic(L"开发者：wet86y  ·  Apache-2.0", IdAboutDeveloper, SS_LEFT | SS_CENTERIMAGE);
+    version_ = makeStatic(L"版本 1.0.1", IdAboutVersion, SS_LEFT | SS_CENTERIMAGE);
+    developer_ = makeStatic(L"开发者：wet86y · Apache-2.0", IdAboutDeveloper, SS_LEFT | SS_CENTERIMAGE);
+    repository_ = makeButton(L"GitHub 项目仓库与更新记录", IdAboutRepository);
     status_ = makeStatic(L"", IdAboutStatus, SS_LEFT);
-    notes_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_MULTILINE | ES_READONLY |
-        ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 1, 1, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAboutNotes)), instance_, nullptr);
+    notes_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_MULTILINE | ES_READONLY |
+        ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 1, 1, hwnd_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAboutNotes)), instance_, nullptr);
     check_ = makeButton(L"检查更新", IdAboutCheck);
     download_ = makeButton(L"下载更新", IdAboutDownload);
     pauseResume_ = makeButton(L"暂停下载", IdAboutPauseResume);
     background_ = makeButton(L"后台下载", IdAboutBackground);
     cancel_ = makeButton(L"取消", IdAboutCancel);
-    acceleration_ = CreateWindowExW(0, L"BUTTON", L"使用加速节点", WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-        0, 0, 1, 1, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAboutAcceleration)), instance_, nullptr);
-    nextNode_ = makeButton(L"切换节点", IdAboutNextNode);
+    acceleration_ = makeButton(L"使用加速节点", IdAboutAcceleration, BS_AUTOCHECKBOX);
+    nextNode_ = makeButton(L"切换加速节点", IdAboutNextNode);
     install_ = makeButton(L"立即安装", IdAboutInstall);
-    repository_ = makeButton(L"GitHub 项目", IdAboutRepository);
-    return title_ && currentVersion_ && developer_ && status_ && notes_ && check_ && download_ && pauseResume_ &&
-           background_ && cancel_ && acceleration_ && nextNode_ && install_ && repository_;
+    return title_ && version_ && developer_ && repository_ && status_ && notes_ && check_ && download_ && pauseResume_ &&
+           background_ && cancel_ && acceleration_ && nextNode_ && install_;
 }
 
 void AboutWindow::RecreateFonts()
@@ -136,12 +142,12 @@ void AboutWindow::RecreateFonts()
     if (dpi == fontDpi_ && titleFont_ != nullptr && bodyFont_ != nullptr) return;
     if (titleFont_ != nullptr) DeleteObject(titleFont_);
     if (bodyFont_ != nullptr) DeleteObject(bodyFont_);
-    titleFont_ = Ui::CreateFont(dpi, 14, FW_SEMIBOLD);
+    titleFont_ = Ui::CreateFont(dpi, 18, FW_SEMIBOLD);
     bodyFont_ = Ui::CreateFont(dpi, 9);
     fontDpi_ = dpi;
     SetControlFont(title_, titleFont_);
-    for (HWND control : {currentVersion_, developer_, status_, notes_, check_, download_, pauseResume_, background_,
-                         cancel_, acceleration_, nextNode_, install_, repository_}) SetControlFont(control, bodyFont_);
+    for (HWND control : {version_, developer_, repository_, status_, notes_, check_, download_, pauseResume_, background_,
+                         cancel_, acceleration_, nextNode_, install_}) SetControlFont(control, bodyFont_);
 }
 
 void AboutWindow::Layout()
@@ -151,8 +157,9 @@ void AboutWindow::Layout()
     layout_ = CalculateAboutLayout(client.right - client.left, client.bottom - client.top,
                                    GetDpiForWindow(hwnd_), state_.presentation);
     Move(title_, layout_.name);
-    Move(currentVersion_, layout_.currentVersion);
+    Move(version_, layout_.version);
     Move(developer_, layout_.developer);
+    Move(repository_, layout_.repository);
     Move(status_, layout_.status);
     Move(notes_, layout_.notes);
     Move(check_, layout_.check);
@@ -163,7 +170,6 @@ void AboutWindow::Layout()
     Move(acceleration_, layout_.acceleration);
     Move(nextNode_, layout_.nextNode);
     Move(install_, layout_.install);
-    Move(repository_, layout_.repository);
 }
 
 void AboutWindow::ApplyState(UpdateViewState state)
@@ -176,9 +182,9 @@ void AboutWindow::ApplyState(UpdateViewState state)
 
 void AboutWindow::UpdateControls()
 {
-    SetWindowTextW(currentVersion_, (std::wstring(L"当前版本：") + kCommandPanelVersion).c_str());
+    SetWindowTextW(version_, (std::wstring(L"版本 ") + kCommandPanelVersion).c_str());
     SetWindowTextW(status_, state_.status.c_str());
-    SetWindowTextW(notes_, state_.releaseNotes.empty() ? L"更新说明会在发现新版本后显示。" : state_.releaseNotes.c_str());
+    SetWindowTextW(notes_, state_.releaseNotes.empty() ? L"发现新版本后将在这里显示更新说明。" : state_.releaseNotes.c_str());
     const bool available = state_.presentation == AboutPresentation::Available;
     const bool downloading = state_.presentation == AboutPresentation::Downloading;
     const bool paused = state_.presentation == AboutPresentation::Paused;
@@ -186,14 +192,14 @@ void AboutWindow::UpdateControls()
     const bool transfer = downloading || paused;
     const bool failed = state_.presentation == AboutPresentation::Failed || state_.presentation == AboutPresentation::Cancelled;
     SetWindowTextW(check_, failed ? L"重新检查" : L"检查更新");
-    SetVisible(check_, !transfer && !completed && state_.presentation != AboutPresentation::Launching);
-    SetVisible(download_, available || paused);
-    SetWindowTextW(download_, paused ? L"继续下载" : L"下载更新");
-    SetVisible(pauseResume_, downloading);
+    SetVisible(check_, !available && !transfer && !completed && state_.presentation != AboutPresentation::Launching);
+    SetVisible(download_, available);
+    SetVisible(pauseResume_, transfer);
+    SetWindowTextW(pauseResume_, paused ? L"继续下载" : L"暂停下载");
     SetVisible(background_, transfer);
     SetVisible(cancel_, transfer);
     SetVisible(install_, completed);
-    SetVisible(acceleration_, available || transfer);
+    SetVisible(acceleration_, available);
     SetVisible(nextNode_, available || transfer);
     SetVisible(notes_, available || transfer || completed || failed);
     EnableWindow(check_, state_.presentation != AboutPresentation::Checking);
@@ -209,20 +215,23 @@ void AboutWindow::DrawButton(const DRAWITEMSTRUCT& item) const
     HDC bufferedDc = nullptr;
     HPAINTBUFFER buffer = BeginBufferedPaint(item.hDC, &client, BPBF_COMPATIBLEBITMAP, nullptr, &bufferedDc);
     HDC dc = buffer != nullptr ? bufferedDc : item.hDC;
-    const bool enabled = (item.itemState & ODS_DISABLED) == 0;
-    const bool pressed = (item.itemState & ODS_SELECTED) != 0;
-    const bool primary = IsPrimaryButton(static_cast<int>(item.CtlID));
-    const COLORREF fill = !enabled ? Ui::Surface : (primary ? (pressed ? Ui::PrimaryPressed : Ui::Primary) :
-        (pressed ? Ui::SurfaceHover : Ui::Window));
-    const COLORREF border = primary ? fill : Ui::BorderStrong;
-    Ui::DrawRoundedRect(dc, client, fill, border, Ui::Scale(7, GetDpiForWindow(hwnd_)));
+    const int id = static_cast<int>(item.CtlID);
+    AboutButtonVisual visual{};
+    visual.kind = id == IdAboutRepository ? AboutButtonKind::Link :
+                  id == IdAboutAcceleration ? AboutButtonKind::CheckBox :
+                  IsPrimaryButton(id) ? AboutButtonKind::Primary : AboutButtonKind::Secondary;
+    visual.enabled = (item.itemState & ODS_DISABLED) == 0;
+    visual.pressed = (item.itemState & ODS_SELECTED) != 0;
+    visual.hot = Ui::IsControlHot(item.hwndItem);
+    visual.focused = (item.itemState & ODS_FOCUS) != 0;
+    visual.checked = (item.itemState & ODS_CHECKED) != 0 ||
+                     (id == IdAboutAcceleration && SendMessageW(item.hwndItem, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    visual.dpi = GetDpiForWindow(hwnd_);
     const HFONT font = reinterpret_cast<HFONT>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0));
     HGDIOBJ old = font != nullptr ? SelectObject(dc, font) : nullptr;
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, !enabled ? Ui::TextMuted : (primary ? RGB(255, 255, 255) : Ui::Text));
-    wchar_t text[128]{};
+    wchar_t text[160]{};
     GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
-    DrawTextW(dc, text, -1, &client, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawAboutButton(dc, client, text, visual);
     if (old != nullptr) SelectObject(dc, old);
     if (buffer != nullptr) EndBufferedPaint(buffer, TRUE);
 }
@@ -234,27 +243,34 @@ void AboutWindow::DrawSurface(HDC target)
     HDC bufferedDc = nullptr;
     HPAINTBUFFER buffer = BeginBufferedPaint(target, &client, BPBF_COMPATIBLEBITMAP, nullptr, &bufferedDc);
     HDC dc = buffer != nullptr ? bufferedDc : target;
-    HBRUSH background = CreateSolidBrush(Ui::Surface);
+    HBRUSH background = CreateSolidBrush(Ui::Window);
     FillRect(dc, &client, background);
     DeleteObject(background);
-    Ui::DrawRoundedRect(dc, layout_.productCard, Ui::Window, Ui::Border, Ui::Scale(12, GetDpiForWindow(hwnd_)));
-    Ui::DrawRoundedRect(dc, layout_.updateCard, Ui::Window, Ui::Border, Ui::Scale(12, GetDpiForWindow(hwnd_)));
-    HBRUSH iconBrush = CreateSolidBrush(Ui::PrimarySoft);
-    FillRect(dc, &layout_.icon, iconBrush);
-    DeleteObject(iconBrush);
-    HICON icon = LoadIconW(instance_, MAKEINTRESOURCEW(101));
-    if (icon != nullptr) DrawIconEx(dc, layout_.icon.left + Ui::Scale(8, GetDpiForWindow(hwnd_)),
-        layout_.icon.top + Ui::Scale(8, GetDpiForWindow(hwnd_)), icon,
-        std::max(1L, layout_.icon.right - layout_.icon.left - Ui::Scale(16, GetDpiForWindow(hwnd_))),
-        std::max(1L, layout_.icon.bottom - layout_.icon.top - Ui::Scale(16, GetDpiForWindow(hwnd_))), 0, nullptr, DI_NORMAL);
-    if (state_.presentation == AboutPresentation::Downloading || state_.presentation == AboutPresentation::Paused ||
-        state_.presentation == AboutPresentation::Completed) {
-        Ui::DrawRoundedRect(dc, layout_.progress, Ui::Surface, Ui::Border, Ui::Scale(5, GetDpiForWindow(hwnd_)));
+    const UINT dpi = GetDpiForWindow(hwnd_);
+    HPEN separator = CreatePen(PS_SOLID, 1, Ui::Border);
+    HGDIOBJ oldPen = SelectObject(dc, separator);
+    MoveToEx(dc, layout_.status.left, layout_.status.top - Ui::Scale(9, dpi), nullptr);
+    LineTo(dc, layout_.status.right, layout_.status.top - Ui::Scale(9, dpi));
+    SelectObject(dc, oldPen);
+    DeleteObject(separator);
+    if (layout_.notes.bottom > layout_.notes.top) {
+        RECT label{layout_.notes.left, layout_.notes.top - Ui::Scale(21, dpi), layout_.notes.right, layout_.notes.top - Ui::Scale(3, dpi)};
+        HGDIOBJ oldFont = bodyFont_ != nullptr ? SelectObject(dc, bodyFont_) : nullptr;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, Ui::Text);
+        DrawTextW(dc, L"更新说明", -1, &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (oldFont != nullptr) SelectObject(dc, oldFont);
+        Ui::DrawRoundedRect(dc, layout_.notes, Ui::Surface, Ui::Border, Ui::Scale(8, dpi));
+    }
+    if (layout_.progress.bottom > layout_.progress.top &&
+        (state_.presentation == AboutPresentation::Downloading || state_.presentation == AboutPresentation::Paused ||
+         state_.presentation == AboutPresentation::Completed)) {
+        Ui::DrawRoundedRect(dc, layout_.progress, Ui::Surface, Ui::Border, Ui::Scale(5, dpi));
         if (state_.total > 0) {
             RECT fill = layout_.progress;
             fill.right = fill.left + static_cast<LONG>((fill.right - fill.left) *
                 std::min(1.0, static_cast<double>(state_.received) / static_cast<double>(state_.total)));
-            Ui::DrawRoundedRect(dc, fill, Ui::Primary, Ui::Primary, Ui::Scale(5, GetDpiForWindow(hwnd_)));
+            if (fill.right > fill.left) Ui::DrawRoundedRect(dc, fill, Ui::Success, Ui::Success, Ui::Scale(5, dpi));
         }
     }
     if (buffer != nullptr) EndBufferedPaint(buffer, TRUE);
@@ -314,7 +330,7 @@ LRESULT AboutWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         HDC dc = reinterpret_cast<HDC>(wParam);
         SetTextColor(dc, Ui::Text);
         SetBkColor(dc, Ui::Surface);
-        return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+        return reinterpret_cast<LRESULT>(surfaceBrush_ != nullptr ? surfaceBrush_ : GetStockObject(LTGRAY_BRUSH));
     }
     case WM_DRAWITEM: {
         const auto* item = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
@@ -326,7 +342,10 @@ LRESULT AboutWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         switch (LOWORD(wParam)) {
         case IdAboutCheck: coordinator_->Check(); return 0;
         case IdAboutDownload: coordinator_->DownloadOrResume(); return 0;
-        case IdAboutPauseResume: coordinator_->Pause(); return 0;
+        case IdAboutPauseResume:
+            if (state_.presentation == AboutPresentation::Paused) coordinator_->DownloadOrResume();
+            else coordinator_->Pause();
+            return 0;
         case IdAboutBackground:
             coordinator_->ContinueInBackground();
             DestroyWindow(hwnd_);

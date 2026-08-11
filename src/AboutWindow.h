@@ -31,8 +31,9 @@ private:
 
     HWND hwnd_ = nullptr;
     HWND title_ = nullptr;
-    HWND currentVersion_ = nullptr;
     HWND developer_ = nullptr;
+    HWND version_ = nullptr;
+    HWND repository_ = nullptr;
     HWND status_ = nullptr;
     HWND notes_ = nullptr;
     HWND check_ = nullptr;
@@ -43,9 +44,9 @@ private:
     HWND acceleration_ = nullptr;
     HWND nextNode_ = nullptr;
     HWND install_ = nullptr;
-    HWND repository_ = nullptr;
     HINSTANCE instance_ = nullptr;
     UpdateCoordinator* coordinator_ = nullptr;
+    HBRUSH surfaceBrush_ = nullptr;
     HFONT titleFont_ = nullptr;
     HFONT bodyFont_ = nullptr;
     UINT fontDpi_{};

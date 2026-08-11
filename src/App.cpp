@@ -1,5 +1,6 @@
 #include "App.h"
 
+#include "ExecutableNameNormalizer.h"
 #include "Utf.h"
 #include "Version.h"
 
@@ -69,6 +70,20 @@ bool VerifyReleaseBundle(HINSTANCE instance)
     return bytes != nullptr && bytes[0] == 'M' && bytes[1] == 'Z';
 }
 
+std::filesystem::path CurrentExecutablePath()
+{
+    std::wstring path(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (length == 0) return {};
+        if (length + 1 < path.size()) {
+            path.resize(length);
+            return std::filesystem::path(path);
+        }
+        path.resize(path.size() * 2);
+    }
+}
+
 StartupRequest ParseStartupRequest()
 {
     int argumentCount = 0;
@@ -100,6 +115,10 @@ int App::Run(HINSTANCE instance, int showCommand)
 {
     const StartupRequest startup = ParseStartupRequest();
     if (startup.verifyRelease) return VerifyReleaseBundle(instance) ? 0 : 10;
+    std::wstring normalizationError;
+    const auto normalization = NormalizeExecutableName(instance, CurrentExecutablePath(), L"快捷控制台.exe", normalizationError);
+    if (normalization == ExecutableNameNormalizationResult::RelaunchStarted) return 0;
+    (void)normalizationError; // Name normalization is deliberately non-blocking.
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};

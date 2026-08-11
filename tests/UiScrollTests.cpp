@@ -3,7 +3,10 @@
 #include "TerminalModel.h"
 #include "TerminalParser.h"
 #include "ConfigManager.h"
+#include "AboutButton.h"
 #include "AboutLayout.h"
+#include "ExecutableNameNormalizer.h"
+#include "UiTheme.h"
 
 #include <richedit.h>
 
@@ -12,6 +15,7 @@
 #include <fstream>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -90,25 +94,104 @@ bool Overlaps(const RECT& left, const RECT& right)
 void TestAboutLayout()
 {
     for (const UINT dpi : {96u, 120u, 144u}) {
-        for (const AboutPresentation presentation : {AboutPresentation::Idle, AboutPresentation::Available,
-                                                      AboutPresentation::Downloading, AboutPresentation::Completed}) {
+        for (const AboutPresentation presentation : {AboutPresentation::Idle, AboutPresentation::Checking,
+                                                      AboutPresentation::Available, AboutPresentation::Downloading,
+                                                      AboutPresentation::Paused, AboutPresentation::Completed,
+                                                      AboutPresentation::Failed}) {
             const AboutLayout layout = CalculateAboutLayout(0, 0, dpi, presentation);
             const RECT client{0, 0, layout.minimumWidth, layout.minimumHeight};
-            Check(Inside(client, layout.productCard) && Inside(client, layout.updateCard),
-                  "about cards must remain inside the minimum client area");
-            Check(Inside(layout.productCard, layout.icon) && Inside(layout.productCard, layout.name) &&
-                      Inside(layout.productCard, layout.repository),
-                  "about product controls must remain inside the product card");
-            Check(Inside(layout.updateCard, layout.currentVersion) && Inside(layout.updateCard, layout.status) &&
-                      Inside(layout.updateCard, layout.check) && Inside(layout.updateCard, layout.pauseResume) &&
-                      Inside(layout.updateCard, layout.acceleration) && Inside(layout.updateCard, layout.nextNode),
-                  "about update controls must remain inside the update card");
-            Check(!Overlaps(layout.check, layout.download) && !Overlaps(layout.download, layout.install) &&
-                      !Overlaps(layout.pauseResume, layout.background) && !Overlaps(layout.background, layout.cancel) &&
-                      !Overlaps(layout.cancel, layout.nextNode) && !Overlaps(layout.notes, layout.acceleration),
-                  "about action controls must not overlap");
+            Check(Inside(client, layout.name) && Inside(client, layout.version) && Inside(client, layout.developer) &&
+                      Inside(client, layout.repository) && Inside(client, layout.status) && Inside(client, layout.check) &&
+                      Inside(client, layout.download) && Inside(client, layout.pauseResume) && Inside(client, layout.background) &&
+                      Inside(client, layout.cancel) && Inside(client, layout.nextNode) && Inside(client, layout.install),
+                  "about controls must remain inside the minimum client area");
+            Check(!Overlaps(layout.name, layout.version) && !Overlaps(layout.version, layout.developer) &&
+                      !Overlaps(layout.developer, layout.repository) && !Overlaps(layout.status, layout.progress),
+                  "about identity and status rows must not overlap");
+            if (presentation == AboutPresentation::Available) {
+                Check(!Overlaps(layout.acceleration, layout.download) && !Overlaps(layout.download, layout.nextNode) &&
+                          !Overlaps(layout.notes, layout.download),
+                      "available update controls must not overlap");
+            }
+            if (presentation == AboutPresentation::Downloading || presentation == AboutPresentation::Paused) {
+                Check(!Overlaps(layout.pauseResume, layout.nextNode) && !Overlaps(layout.background, layout.cancel) &&
+                          !Overlaps(layout.pauseResume, layout.background) && !Overlaps(layout.notes, layout.cancel),
+                      "download controls must not overlap");
+            }
         }
     }
+}
+
+bool NearBlack(COLORREF color)
+{
+    return GetRValue(color) < 42 && GetGValue(color) < 42 && GetBValue(color) < 42;
+}
+
+void TestAboutButtonNoBlackBorder()
+{
+    for (const UINT dpi : {96u, 120u, 144u}) {
+        HDC screen = GetDC(nullptr);
+        HDC dc = CreateCompatibleDC(screen);
+        ReleaseDC(nullptr, screen);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = 180;
+        info.bmiHeader.biHeight = -72;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        void* pixels = nullptr;
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        HGDIOBJ old = SelectObject(dc, bitmap);
+        const RECT full{0, 0, 180, 72};
+        HBRUSH background = CreateSolidBrush(Ui::Surface);
+        FillRect(dc, &full, background);
+        DeleteObject(background);
+        const RECT bounds{24, 18, 156, 54};
+        const std::vector<AboutButtonVisual> visuals{
+            {AboutButtonKind::Primary, true, false, false, false, false, dpi},
+            {AboutButtonKind::Primary, true, true, true, true, false, dpi},
+            {AboutButtonKind::Secondary, true, false, true, true, false, dpi},
+            {AboutButtonKind::Secondary, false, false, false, false, false, dpi},
+            {AboutButtonKind::Link, true, false, true, true, false, dpi},
+            {AboutButtonKind::CheckBox, true, false, true, true, true, dpi},
+            {AboutButtonKind::CheckBox, false, false, false, false, false, dpi},
+        };
+        for (const auto& visual : visuals) {
+            FillRect(dc, &full, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            DrawAboutButton(dc, bounds, L"", visual);
+            const int inset = std::max(16, Ui::Scale(18, dpi));
+            const POINT samples[]{
+                {(bounds.left + bounds.right) / 2, bounds.top},
+                {(bounds.left + bounds.right) / 2, bounds.bottom - 1},
+                {bounds.left, (bounds.top + bounds.bottom) / 2},
+                {bounds.right - 1, (bounds.top + bounds.bottom) / 2},
+                {bounds.left + inset, bounds.top},
+                {bounds.right - inset, bounds.bottom - 1},
+            };
+            for (const POINT point : samples) {
+                Check(!NearBlack(GetPixel(dc, point.x, point.y)),
+                      "about button frame must not regress to a black system border");
+            }
+        }
+        SelectObject(dc, old);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+    }
+}
+
+void TestExecutableNameNormalizationTarget()
+{
+    const auto directory = std::filesystem::absolute(std::filesystem::temp_directory_path() / L"CommandPanelNameTests");
+    const auto english = directory / L"quick-command-panel.exe";
+    const auto canonical = CanonicalExecutableTarget(english, L"快捷控制台.exe");
+    Check(canonical == directory / L"快捷控制台.exe", "English release assets should map to the canonical Chinese name");
+    Check(!CanonicalExecutableTarget(directory / L"快捷控制台.EXE", L"快捷控制台.exe"),
+          "canonical executable comparison must be case insensitive");
+    Check(!CanonicalExecutableTarget(english, L"nested\\快捷控制台.exe"),
+          "canonical executable name must reject directory traversal");
+    Check(!CanonicalExecutableTarget(std::filesystem::path(L"relative.exe"), L"快捷控制台.exe"),
+          "canonical executable path must be absolute");
 }
 
 std::wstring LongText()
@@ -287,6 +370,8 @@ int wmain()
     TestWheelAccumulation();
     TestButtonLayout();
     TestAboutLayout();
+    TestAboutButtonNoBlackBorder();
+    TestExecutableNameNormalizationTarget();
     TestRealEditControls();
     TestTerminalModel();
     TestTerminalInputEncoding();
