@@ -1,6 +1,7 @@
 # CMake and Visual Studio output
 build/
 build-ui/
+artifacts/
 .vs/
 out/
 

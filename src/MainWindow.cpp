@@ -8,6 +8,7 @@
 
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <objidl.h>
 #include <gdiplus.h>
 #include <shellapi.h>
 #include <uxtheme.h>
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <filesystem>
 #include <iterator>
 
 namespace {
@@ -38,6 +40,7 @@ constexpr int IdOutputHost = 2019;
 constexpr int IdInputHost = 2020;
 constexpr int IdTerminalPowerShell = 2021;
 constexpr int IdTerminalWsl = 2022;
+constexpr int IdAbout = 2023;
 constexpr int IdAppIcon = 101;
 constexpr UINT MsgBeginWindowResize = WM_APP + 30;
 LPCWSTR ResizeCursor(int hit);
@@ -285,6 +288,8 @@ MainWindow::MainWindow(bool elevated, std::optional<TerminalKind> startupTermina
 MainWindow::~MainWindow()
 {
     shuttingDown_ = true;
+    aboutWindow_.reset();
+    if (updater_ != nullptr) (void)updater_->Shutdown(5000);
     for (auto& terminal : terminals_) terminal->session.Stop();
     if (outputFont_ != nullptr) DeleteObject(outputFont_);
     if (headerFont_ != nullptr) DeleteObject(headerFont_);
@@ -341,6 +346,11 @@ bool MainWindow::Create(HINSTANCE instance)
         const COLORREF borderColor = 0xFFFFFFFE; // DWMWA_COLOR_NONE
         DwmSetWindowAttribute(hwnd_, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
         Ui::EnableRoundedCorners(hwnd_);
+        std::wstring executable(32'768, L'\0');
+        const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+        executable.resize(length);
+        updater_ = std::make_unique<UpdateCoordinator>(instance_, std::filesystem::path(executable),
+            [this] { if (hwnd_ != nullptr) PostMessageW(hwnd_, WM_CLOSE, 0, 0); });
     }
     return hwnd_ != nullptr;
 }
@@ -357,6 +367,8 @@ bool MainWindow::Initialize()
                                    420, 0, 220, 32, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdConnection)), instance_, nullptr);
     runtimeState_ = CreateWindowExW(0, L"STATIC", L"终端不可用", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
                                     0, 0, 160, 32, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdRuntimeState)), instance_, nullptr);
+    about_ = CreateWindowExW(0, L"BUTTON", L"关于", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                             0, 0, 64, 32, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAbout)), instance_, nullptr);
     tabBar_.Create(hwnd_);
     tabBar_.SetCallbacks([this](int index) { OnTabSelected(index); },
                          [this] { AddTab(); },
@@ -421,7 +433,7 @@ bool MainWindow::Initialize()
     execute_ = CreateWindowExW(0, L"BUTTON", L"执行", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                 0, 0, 110, 40, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdExecute)), instance_, nullptr);
     if (!title_ || !adminMode_ || !connection_ || !tabBar_.Hwnd() || !buttonPanel_.Hwnd() ||
-        !runtimeState_ || !terminalPowerShell_ || !terminalWsl_ || !outputHost_ ||
+        !runtimeState_ || !about_ || !terminalPowerShell_ || !terminalWsl_ || !outputHost_ ||
         !terminalView_.Hwnd() || !inputHost_ || !input_ || !execute_) return false;
 
     SetWindowTextW(title_, L"快捷控制台");
@@ -459,7 +471,7 @@ bool MainWindow::Initialize()
                                               instance_, reinterpret_cast<void*>(static_cast<INT_PTR>(resizeHits[index])));
         if (resizeEdges_[index] == nullptr) return false;
     }
-    for (HWND button : {terminalPowerShell_, terminalWsl_, clear_, ctrlC_, reset_, execute_, minimize_, maximize_, close_}) {
+    for (HWND button : {about_, terminalPowerShell_, terminalWsl_, clear_, ctrlC_, reset_, execute_, minimize_, maximize_, close_}) {
         SetWindowLongPtrW(button, GWL_STYLE, GetWindowLongPtrW(button, GWL_STYLE) | BS_OWNERDRAW);
         Ui::TrackOwnerDrawButton(button);
     }
@@ -561,7 +573,7 @@ void MainWindow::RecreateFonts()
     sectionFont_ = Ui::CreateFont(fontDpi_, 11, FW_SEMIBOLD);
     bodyFont_ = Ui::CreateFont(fontDpi_, 10);
     SetFont(title_, headerFont_); SetFont(adminMode_, bodyFont_); SetFont(connection_, bodyFont_);
-    SetFont(runtimeState_, bodyFont_); SetFont(terminalPowerShell_, bodyFont_); SetFont(terminalWsl_, bodyFont_);
+    SetFont(runtimeState_, bodyFont_); SetFont(about_, bodyFont_); SetFont(terminalPowerShell_, bodyFont_); SetFont(terminalWsl_, bodyFont_);
     terminalView_.SetFont(outputFont_);
     SetFont(input_, bodyFont_); SetFont(inputPrefix_, sectionFont_); SetFont(execute_, bodyFont_);
     SetFont(clear_, bodyFont_); SetFont(ctrlC_, bodyFont_); SetFont(reset_, bodyFont_);
@@ -630,8 +642,12 @@ void MainWindow::Layout()
     moveChild(title_, s(56), 0, s(160), headerHeight);
     moveChild(adminMode_, s(274), 0, s(96), headerHeight);
     moveChild(connection_, s(398), 0, s(145), headerHeight);
-    moveChild(runtimeState_, s(558), 0, s(118), headerHeight);
-    moveChild(minimize_, width - captionWidth * 3, 0, captionWidth, headerHeight);
+    const int captionLeft = width - captionWidth * 3;
+    const int aboutWidth = s(62);
+    const int aboutLeft = captionLeft - aboutWidth - s(4);
+    moveChild(runtimeState_, s(558), 0, std::max(s(52), aboutLeft - s(562)), headerHeight);
+    moveChild(about_, aboutLeft, s(12), aboutWidth, s(36));
+    moveChild(minimize_, captionLeft, 0, captionWidth, headerHeight);
     moveChild(maximize_, width - captionWidth * 2, 0, captionWidth, headerHeight);
     moveChild(close_, width - captionWidth, 0, captionWidth, headerHeight);
     moveChild(tabBar_.Hwnd(), 0, headerHeight, width, tabsHeight);
@@ -902,6 +918,13 @@ void MainWindow::SetStatus(const std::wstring& text)
         while (!normalized.empty() && iswspace(normalized.front())) normalized.erase(normalized.begin());
     }
     SetWindowTextW(runtimeState_, normalized.c_str());
+}
+
+void MainWindow::ShowAbout()
+{
+    if (updater_ == nullptr) return;
+    if (aboutWindow_ == nullptr) aboutWindow_ = std::make_unique<AboutWindow>();
+    aboutWindow_->Show(hwnd_, instance_, *updater_);
 }
 
 void MainWindow::AddDiagnostic(const std::wstring& text)
@@ -1643,6 +1666,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         switch (LOWORD(wParam)) {
         case IdTerminalPowerShell: SwitchTerminal(TerminalKind::PowerShell); return 0;
         case IdTerminalWsl: SwitchTerminal(TerminalKind::Wsl); return 0;
+        case IdAbout: ShowAbout(); return 0;
         case IdMinimize:
             ShowWindow(hwnd_, SW_MINIMIZE);
             return 0;

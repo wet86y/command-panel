@@ -1,0 +1,44 @@
+{
+  "applicationId": "command-panel",
+  "repository": "wet86y/command-panel",
+  "publishedExeName": "\u5feb\u6377\u63a7\u5236\u53f0.exe",
+  "releaseAssetName": "quick-command-panel.exe",
+  "projectFile": "CMakeLists.txt",
+  "artifactsDirectory": "artifacts/\u5feb\u6377\u63a7\u5236\u53f0-win-x64",
+  "runtimeIdentifier": "win-x64",
+  "releaseVerificationArguments": [
+    "--verify-release"
+  ],
+  "about": {
+    "displayName": "\u5feb\u6377\u63a7\u5236\u53f0",
+    "developer": "wet86y",
+    "historyUrl": "https://github.com/wet86y/command-panel",
+    "licenseUrl": "https://www.apache.org/licenses/LICENSE-2.0"
+  },
+  "downloadNodes": [
+    {
+      "id": "gh-proxy",
+      "template": "https://gh-proxy.com/{url}",
+      "priority": 10,
+      "enabled": true
+    },
+    {
+      "id": "gh-llkk",
+      "template": "https://gh.llkk.cc/{url}",
+      "priority": 20,
+      "enabled": true
+    },
+    {
+      "id": "ghproxy-net",
+      "template": "https://ghproxy.net/{url}",
+      "priority": 30,
+      "enabled": true
+    },
+    {
+      "id": "github-direct",
+      "template": "{url}",
+      "priority": 1000,
+      "enabled": true
+    }
+  ]
+}

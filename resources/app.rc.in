@@ -1,12 +1,12 @@
 #include <windows.h>
 
-101 ICON "app.ico"
-1 RT_MANIFEST "app.manifest"
+101 ICON "generated/app.ico"
+1 RT_MANIFEST "generated/app.manifest"
 
 #pragma code_page(65001)
 1 VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -17,13 +17,13 @@ BEGIN
     BEGIN
         BLOCK "080404b0"
         BEGIN
-            VALUE "CompanyName", "快捷控制台\0"
+            VALUE "CompanyName", "wet86y\0"
             VALUE "FileDescription", "快捷控制台\0"
-            VALUE "FileVersion", "1.0.0.0\0"
-            VALUE "InternalName", "快捷控制台\0"
+            VALUE "FileVersion", "@PROJECT_VERSION@.0\0"
+            VALUE "InternalName", "CommandPanel\0"
             VALUE "OriginalFilename", "快捷控制台.exe\0"
             VALUE "ProductName", "快捷控制台\0"
-            VALUE "ProductVersion", "1.0.0\0"
+            VALUE "ProductVersion", "@PROJECT_VERSION@\0"
         END
     END
     BLOCK "VarFileInfo"

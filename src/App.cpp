@@ -1,12 +1,15 @@
 #include "App.h"
 
 #include "Utf.h"
+#include "Version.h"
 
 #include <commctrl.h>
+#include <objbase.h>
 #include <shellapi.h>
 #include <uxtheme.h>
 
 #include <optional>
+#include <filesystem>
 
 namespace {
 bool IsElevated()
@@ -25,7 +28,46 @@ struct StartupRequest
 {
     std::optional<TerminalKind> terminal;
     std::wstring command;
+    std::optional<std::wstring> updateHealthMarker;
+    bool verifyRelease{};
 };
+
+bool WriteUpdateHealthMarker(const std::wstring& marker)
+{
+    try {
+        const std::filesystem::path path(marker);
+        if (!path.is_absolute() || path.parent_path().empty()) return false;
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) return false;
+        const std::wstring temporary = path.wstring() + L".tmp." + std::to_wstring(GetCurrentProcessId());
+        HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        const std::string text = WideToUtf8(kCommandPanelVersion);
+        DWORD written{};
+        const bool wrote = WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) &&
+                           written == text.size() && FlushFileBuffers(file);
+        CloseHandle(file);
+        if (!wrote || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            DeleteFileW(temporary.c_str());
+            return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool VerifyReleaseBundle(HINSTANCE instance)
+{
+    HRSRC version = FindResourceW(instance, MAKEINTRESOURCEW(1), RT_VERSION);
+    HRSRC stub = FindResourceW(instance, MAKEINTRESOURCEW(201), RT_RCDATA);
+    if (version == nullptr || stub == nullptr || SizeofResource(instance, stub) < 2) return false;
+    HGLOBAL loaded = LoadResource(instance, stub);
+    const auto* bytes = loaded != nullptr ? static_cast<const unsigned char*>(LockResource(loaded)) : nullptr;
+    return bytes != nullptr && bytes[0] == 'M' && bytes[1] == 'Z';
+}
 
 StartupRequest ParseStartupRequest()
 {
@@ -41,7 +83,13 @@ StartupRequest ParseStartupRequest()
             TerminalKind kind = TerminalKind::PowerShell;
             if (ParseTerminalKind(WideToUtf8(arguments[index + 1]), kind)) request.terminal = kind;
             ++index;
+        } else if (std::wstring_view(arguments[index]) == L"--update-health") {
+            request.updateHealthMarker = arguments[index + 1];
+            ++index;
         }
+    }
+    for (int index = 1; index < argumentCount; ++index) {
+        if (std::wstring_view(arguments[index]) == L"--verify-release") request.verifyRelease = true;
     }
     LocalFree(arguments);
     return request;
@@ -50,18 +98,26 @@ StartupRequest ParseStartupRequest()
 
 int App::Run(HINSTANCE instance, int showCommand)
 {
+    const StartupRequest startup = ParseStartupRequest();
+    if (startup.verifyRelease) return VerifyReleaseBundle(instance) ? 0 : 10;
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
     const bool bufferedPaintInitialized = SUCCEEDED(BufferedPaintInit());
-    StartupRequest startup = ParseStartupRequest();
     MainWindow window{IsElevated(), startup.terminal, std::move(startup.command)};
     if (!window.Create(instance) || !window.Initialize()) {
         MessageBoxW(nullptr, L"快捷控制台主窗口初始化失败。", L"快捷控制台", MB_OK | MB_ICONERROR);
         if (bufferedPaintInitialized) BufferedPaintUnInit();
         if (SUCCEEDED(comResult)) CoUninitialize();
         return 1;
+    }
+    if (startup.updateHealthMarker && !WriteUpdateHealthMarker(*startup.updateHealthMarker)) {
+        MessageBoxW(window.Hwnd(), L"更新后的启动健康标记写入失败，更新助手将回滚到上一版本。",
+                    L"快捷控制台", MB_OK | MB_ICONERROR);
+        if (bufferedPaintInitialized) BufferedPaintUnInit();
+        if (SUCCEEDED(comResult)) CoUninitialize();
+        return 2;
     }
     ShowWindow(window.Hwnd(), showCommand);
     UpdateWindow(window.Hwnd());

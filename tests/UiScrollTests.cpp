@@ -3,6 +3,7 @@
 #include "TerminalModel.h"
 #include "TerminalParser.h"
 #include "ConfigManager.h"
+#include "AboutLayout.h"
 
 #include <richedit.h>
 
@@ -74,6 +75,40 @@ void TestButtonLayout()
 
     const ButtonLayoutResult narrow = CalculateButtonLayout(360, 300, 144, 5, 0);
     Check(narrow.columns >= 1 && narrow.columns < 4, "narrow high-DPI panel should reduce columns");
+}
+
+bool Inside(const RECT& outer, const RECT& inner)
+{
+    return inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom;
+}
+
+bool Overlaps(const RECT& left, const RECT& right)
+{
+    return left.left < right.right && right.left < left.right && left.top < right.bottom && right.top < left.bottom;
+}
+
+void TestAboutLayout()
+{
+    for (const UINT dpi : {96u, 120u, 144u}) {
+        for (const AboutPresentation presentation : {AboutPresentation::Idle, AboutPresentation::Available,
+                                                      AboutPresentation::Downloading, AboutPresentation::Completed}) {
+            const AboutLayout layout = CalculateAboutLayout(0, 0, dpi, presentation);
+            const RECT client{0, 0, layout.minimumWidth, layout.minimumHeight};
+            Check(Inside(client, layout.productCard) && Inside(client, layout.updateCard),
+                  "about cards must remain inside the minimum client area");
+            Check(Inside(layout.productCard, layout.icon) && Inside(layout.productCard, layout.name) &&
+                      Inside(layout.productCard, layout.repository),
+                  "about product controls must remain inside the product card");
+            Check(Inside(layout.updateCard, layout.currentVersion) && Inside(layout.updateCard, layout.status) &&
+                      Inside(layout.updateCard, layout.check) && Inside(layout.updateCard, layout.pauseResume) &&
+                      Inside(layout.updateCard, layout.acceleration) && Inside(layout.updateCard, layout.nextNode),
+                  "about update controls must remain inside the update card");
+            Check(!Overlaps(layout.check, layout.download) && !Overlaps(layout.download, layout.install) &&
+                      !Overlaps(layout.pauseResume, layout.background) && !Overlaps(layout.background, layout.cancel) &&
+                      !Overlaps(layout.cancel, layout.nextNode) && !Overlaps(layout.notes, layout.acceleration),
+                  "about action controls must not overlap");
+        }
+    }
 }
 
 std::wstring LongText()
@@ -251,6 +286,7 @@ int wmain()
     TestThumbCalculation();
     TestWheelAccumulation();
     TestButtonLayout();
+    TestAboutLayout();
     TestRealEditControls();
     TestTerminalModel();
     TestTerminalInputEncoding();

@@ -17,11 +17,12 @@
 
 ## 构建
 
-要求：Visual Studio 2026 Community / MSVC 14.51、CMake 3.24 或更高版本、Windows x64。项目使用静态 CRT `/MT`，不依赖 Qt、.NET、Node、联网服务或构建时下载。
+要求：Visual Studio 2026 Community / MSVC 14.51、CMake 3.25 或更高版本、Windows x64。项目使用静态 CRT `/MT`，不依赖 Qt、.NET、Node 或额外 UI 运行时。
 
 在 Visual Studio Developer PowerShell 中执行：
 
 ```powershell
+git submodule update --init --recursive
 cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 cmake --build build --config Release
 ```
@@ -91,3 +92,22 @@ UI 线程不直接读取 ConPTY 管道。终端后台线程通过 `PostMessageW`
 ## 当前边界
 
 当前终端面向常见键盘驱动的 VT/xterm TUI；不实现终端鼠标协议、超链接、图片或 Sixel。WSL 页固定连接系统默认发行版并启动 Bash 登录 Shell，不提供多发行版或自定义 shell 管理。
+
+## 关于与更新
+
+标题栏“关于”按钮会打开不阻塞终端的原生 Win32 页面。页面显示当前版本、项目链接、Apache-2.0 许可，并使用 `DesktopUpdateKit` 从 GitHub Release 检查和下载更新。更新内容在页面内展示：可检查更新、阅读说明、下载、暂停/继续、取消、选择后台下载、切换加速节点，并且只有在 SHA-256 校验完成后才能明确点击安装。
+
+下载节点只负责 EXE 传输；版本清单与 SHA-256 始终以 GitHub Release 为信任源。关闭关于窗口默认暂停传输，选择“后台下载”后才会继续。更新助手会等待当前进程退出、替换 EXE、启动新版并等待 `--update-health` 健康标记；超时或校验失败会回滚。
+
+发布者可执行：
+
+```powershell
+.\scripts\build-release.ps1
+.\scripts\prepare-release-assets.ps1 -Version 1.0.0 -ReleaseNotes "首个公开版本。"
+```
+
+在已创建并推送 `v1.0.0` 草稿 Release 后，执行 `.\scripts\publish-release.ps1 -Version 1.0.0 -Finalize`。发布资产包括 EXE、SHA-256、`update.json`、Apache-2.0 许可证、NOTICE、第三方声明和 DesktopUpdateKit 的 MIT 文本。
+
+## 许可证
+
+快捷控制台以 [Apache License 2.0](LICENSE) 发布。`DesktopUpdateKit` 为独立 MIT 许可子模块，归属和完整声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。

@@ -1,10 +1,22 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.25)
 
-project(CommandPanel LANGUAGES CXX)
+project(CommandPanel VERSION 1.0.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/DesktopUpdateKit/native"
+    "${CMAKE_BINARY_DIR}/desktop-update-kit")
+
+set(COMMAND_PANEL_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${COMMAND_PANEL_GENERATED_DIR}")
+configure_file(src/Version.h.in "${COMMAND_PANEL_GENERATED_DIR}/Version.h" @ONLY)
+configure_file(resources/app.manifest "${COMMAND_PANEL_GENERATED_DIR}/app.manifest" COPYONLY)
+configure_file(resources/app.ico "${COMMAND_PANEL_GENERATED_DIR}/app.ico" COPYONLY)
+configure_file(resources/app.rc.in "${COMMAND_PANEL_GENERATED_DIR}/app.rc" @ONLY)
+file(GENERATE OUTPUT "${COMMAND_PANEL_GENERATED_DIR}/$<CONFIG>/updater_stub.rc"
+    CONTENT "201 RCDATA \"bin/$<CONFIG>/DesktopUpdateKitUpdaterStub.exe\"\n")
 
 add_executable(CommandPanel WIN32
     src/main.cpp
@@ -21,10 +33,14 @@ add_executable(CommandPanel WIN32
     src/TerminalModel.cpp
     src/TerminalView.cpp
     src/CommandExecutor.cpp
+    src/AboutLayout.cpp
+    src/AboutWindow.cpp
+    src/UpdateCoordinator.cpp
     src/Utf.cpp
     src/UiTheme.cpp
     src/UiScroll.cpp
-    resources/app.rc
+    "${COMMAND_PANEL_GENERATED_DIR}/app.rc"
+    "${COMMAND_PANEL_GENERATED_DIR}/$<CONFIG>/updater_stub.rc"
 )
 
 set_target_properties(CommandPanel PROPERTIES
@@ -32,7 +48,7 @@ set_target_properties(CommandPanel PROPERTIES
     PROJECT_LABEL "快捷控制台"
 )
 
-target_include_directories(CommandPanel PRIVATE src)
+target_include_directories(CommandPanel PRIVATE src "${COMMAND_PANEL_GENERATED_DIR}")
 
 target_compile_definitions(CommandPanel PRIVATE
     UNICODE
@@ -45,6 +61,7 @@ target_compile_options(CommandPanel PRIVATE
     /utf-8
     /W4
     /permissive-
+    /EHsc
 )
 
 set_property(TARGET CommandPanel PROPERTY
@@ -62,6 +79,7 @@ target_link_libraries(CommandPanel PRIVATE
     dwmapi
     gdiplus
     uxtheme
+    desktop_update_kit_native
 )
 
 if(MSVC)
@@ -83,8 +101,9 @@ if(BUILD_TESTING)
         src/TerminalParser.cpp
         src/ConfigManager.cpp
         src/Utf.cpp
+        src/AboutLayout.cpp
     )
-    target_include_directories(CommandPanelUiTests PRIVATE src)
+    target_include_directories(CommandPanelUiTests PRIVATE src "${COMMAND_PANEL_GENERATED_DIR}")
     target_compile_definitions(CommandPanelUiTests PRIVATE
         UNICODE
         _UNICODE

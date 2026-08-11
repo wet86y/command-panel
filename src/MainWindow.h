@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ButtonPanel.h"
+#include "AboutWindow.h"
 #include "CommandExecutor.h"
 #include "ConfigManager.h"
 #include "TerminalParser.h"
@@ -96,6 +97,7 @@ private:
     void UpdateBusyState();
     void AddDiagnostic(const std::wstring& text);
     void PersistUiState();
+    void ShowAbout();
 
     struct TerminalContext
     {
@@ -128,6 +130,7 @@ private:
     HWND inputHost_ = nullptr;
     HWND inputScroll_ = nullptr;
     HWND runtimeState_ = nullptr;
+    HWND about_ = nullptr;
     HWND title_ = nullptr;
     HWND adminMode_ = nullptr;
     HWND connection_ = nullptr;
@@ -155,6 +158,8 @@ private:
     TabBar tabBar_;
     ButtonPanel buttonPanel_;
     TerminalView terminalView_;
+    std::unique_ptr<UpdateCoordinator> updater_;
+    std::unique_ptr<AboutWindow> aboutWindow_;
     ConfigManager config_;
     std::array<std::unique_ptr<TerminalContext>, 2> terminals_;
     int inputWheelRemainder_ = 0;
