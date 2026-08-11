@@ -44,8 +44,11 @@ struct State
     CommandButton result;
     TerminalKind selectedTerminal = TerminalKind::PowerShell;
     bool requireConfirmation{};
+    bool commandPreview{};
     std::wstring title;
     std::wstring messageText;
+    std::wstring buttonName;
+    std::wstring commandText;
     std::wstring primaryText = L"保存";
     bool accepted = false;
 };
@@ -84,6 +87,7 @@ SIZE DialogSize(const State& state)
 {
     if (state.mode == DialogMode::Editor) return SIZE{S(state, 560), S(state, 490)};
     if (state.mode == DialogMode::Name) return SIZE{S(state, 520), S(state, 250)};
+    if (state.commandPreview) return SIZE{S(state, 520), S(state, 240)};
     return SIZE{S(state, 520), S(state, 280)};
 }
 
@@ -98,7 +102,8 @@ void Layout(State& state)
     const int buttonHeight = S(state, 36);
     const int buttonGap = S(state, 10);
     const int footerTop = state.mode == DialogMode::Editor ? S(state, 416) :
-                          state.mode == DialogMode::Name ? S(state, 176) : S(state, 194);
+                          state.mode == DialogMode::Name ? S(state, 176) :
+                          state.commandPreview ? S(state, 170) : S(state, 194);
     const int buttonY = footerTop + (height - footerTop - buttonHeight) / 2;
 
     MoveWindow(state.close, width - S(state, 48), 0, S(state, 48), S(state, 56), TRUE);
@@ -131,6 +136,42 @@ void SetError(State& state, const wchar_t* text)
 {
     SetWindowTextW(state.error, text);
     ShowWindow(state.error, text != nullptr && *text != L'\0' ? SW_SHOW : SW_HIDE);
+}
+
+std::wstring SingleLinePreview(std::wstring_view text)
+{
+    std::wstring preview;
+    preview.reserve(text.size());
+    bool previousSpace{};
+    for (const wchar_t character : text) {
+        const bool whitespace = character == L'\r' || character == L'\n' || character == L'\t';
+        if (whitespace) {
+            if (!previousSpace) preview.push_back(L' ');
+            previousSpace = true;
+        } else {
+            preview.push_back(character);
+            previousSpace = character == L' ';
+        }
+    }
+    return preview;
+}
+
+void DrawCommandConfirmation(const State& state, HDC dc, const RECT& client)
+{
+    const int margin = S(state, 28);
+    HGDIOBJ oldBody = SelectObject(dc, state.bodyFont);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, Ui::Text);
+    RECT prompt{margin, S(state, 76), client.right - margin, S(state, 98)};
+    DrawTextW(dc, L"确认执行？", -1, &prompt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    RECT button{margin, S(state, 103), client.right - margin, S(state, 125)};
+    const std::wstring buttonText = L"按钮：" + state.buttonName;
+    DrawTextW(dc, buttonText.c_str(), -1, &button, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    RECT command{margin, S(state, 130), client.right - margin, S(state, 152)};
+    const std::wstring commandText = L"命令：" + SingleLinePreview(state.commandText);
+    DrawTextW(dc, commandText.c_str(), -1, &command,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dc, oldBody);
 }
 
 bool HasNonSpace(const std::wstring& value)
@@ -173,7 +214,8 @@ void Accept(State& state)
 
 void DrawButton(const State& state, const DRAWITEMSTRUCT& item)
 {
-    RECT rect = item.rcItem;
+    RECT rect{};
+    GetClientRect(item.hwndItem, &rect);
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
     const bool hot = Ui::IsControlHot(item.hwndItem);
@@ -244,7 +286,7 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         state->cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), GetModuleHandleW(nullptr), nullptr);
         Ui::TrackOwnerDrawButton(state->close); Ui::TrackOwnerDrawButton(state->ok); Ui::TrackOwnerDrawButton(state->cancel);
-        if (state->mode == DialogMode::Confirm) {
+        if (state->mode == DialogMode::Confirm && !state->commandPreview) {
             state->message = CreateWindowExW(0, L"STATIC", state->messageText.c_str(),
                                              WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
         } else {
@@ -291,7 +333,8 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         RECT client{}; GetClientRect(hwnd, &client);
         HBRUSH white = CreateSolidBrush(Ui::Window); FillRect(dc, &client, white); DeleteObject(white);
         const int footerTop = state->mode == DialogMode::Editor ? S(*state, 416) :
-                              state->mode == DialogMode::Name ? S(*state, 176) : S(*state, 194);
+                              state->mode == DialogMode::Name ? S(*state, 176) :
+                              state->commandPreview ? S(*state, 170) : S(*state, 194);
         RECT footer{0, footerTop, client.right, client.bottom};
         HBRUSH footerBrush = CreateSolidBrush(Ui::Surface); FillRect(dc, &footer, footerBrush); DeleteObject(footerBrush);
         HPEN line = CreatePen(PS_SOLID, 1, Ui::Border); HGDIOBJ oldPen = SelectObject(dc, line);
@@ -303,7 +346,9 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         RECT titleRect{S(*state, 24), 0, client.right - S(*state, 56), S(*state, 56)};
         DrawTextW(dc, state->title.c_str(), -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         SelectObject(dc, oldFont);
-        if (state->mode != DialogMode::Confirm) {
+        if (state->mode == DialogMode::Confirm && state->commandPreview) {
+            DrawCommandConfirmation(*state, dc, client);
+        } else if (state->mode != DialogMode::Confirm) {
             RECT nameBox{S(*state, 28), S(*state, 99), client.right - S(*state, 28), S(*state, 139)};
             Ui::DrawRoundedRect(dc, nameBox, Ui::Window, GetFocus() == state->name ? Ui::Primary : Ui::BorderStrong, S(*state, 8));
             if (state->mode == DialogMode::Editor) {
@@ -458,5 +503,18 @@ bool CommandDialog::Confirm(HWND owner, const std::wstring& title, const std::ws
     state.title = title;
     state.messageText = message;
     state.primaryText = primaryText;
+    return ShowInternal(state);
+}
+
+bool CommandDialog::ConfirmCommand(HWND owner, const std::wstring& buttonName, const std::wstring& command)
+{
+    State state;
+    state.owner = owner;
+    state.mode = DialogMode::Confirm;
+    state.commandPreview = true;
+    state.title = L"确认执行";
+    state.buttonName = buttonName;
+    state.commandText = command;
+    state.primaryText = L"执行";
     return ShowInternal(state);
 }

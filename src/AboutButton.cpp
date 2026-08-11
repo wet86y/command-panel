@@ -2,17 +2,6 @@
 
 #include "UiTheme.h"
 
-#include <algorithm>
-
-namespace {
-void DrawFocusRing(HDC dc, RECT bounds, UINT dpi)
-{
-    InflateRect(&bounds, -Ui::Scale(2, dpi), -Ui::Scale(2, dpi));
-    Ui::DrawRoundedRect(dc, bounds, Ui::Primary, Ui::Primary, Ui::Scale(7, dpi));
-}
-
-}
-
 void FillAboutButtonBackground(HDC dc, const RECT& bounds)
 {
     HBRUSH background = CreateSolidBrush(Ui::Window);
@@ -26,13 +15,12 @@ void DrawAboutButton(HDC dc, RECT bounds, std::wstring_view text,
     FillAboutButtonBackground(dc, bounds);
     const int radius = Ui::Scale(7, visual.dpi);
     const bool interactive = visual.enabled && visual.kind != AboutButtonKind::Link;
-    if (visual.focused && visual.enabled) DrawFocusRing(dc, bounds, visual.dpi);
-
     if (visual.kind == AboutButtonKind::Link) {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, visual.enabled ? Ui::Primary : Ui::TextMuted);
         DrawTextW(dc, text.data(), static_cast<int>(text.size()), &bounds,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (visual.focused && visual.enabled) Ui::DrawFocusOutline(dc, bounds, visual.dpi);
         return;
     }
 
@@ -54,4 +42,5 @@ void DrawAboutButton(HDC dc, RECT bounds, std::wstring_view text,
     SetTextColor(dc, !visual.enabled ? Ui::TextMuted : (primary ? RGB(255, 255, 255) : Ui::Text));
     DrawTextW(dc, text.data(), static_cast<int>(text.size()), &bounds,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (visual.focused && visual.enabled) Ui::DrawFocusOutline(dc, bounds, visual.dpi);
 }

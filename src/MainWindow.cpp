@@ -1083,8 +1083,7 @@ void MainWindow::ExecuteButton(int index)
     auto& buttons = config_.Tabs()[activeTab_].buttons;
     const auto& button = buttons[index];
     if (button.confirm) {
-        const std::wstring message = L"确认执行？\r\n\r\n按钮：" + button.name + L"\r\n\r\n命令：\r\n" + button.command;
-        if (!CommandDialog::Confirm(hwnd_, L"确认执行", message, L"执行")) return;
+        if (!CommandDialog::ConfirmCommand(hwnd_, button.name, button.command)) return;
     }
     if (!ExecuteManagedCommand(button.terminal, button.command)) {
         SetStatus(L"●  命令无法发送");

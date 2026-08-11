@@ -255,6 +255,42 @@ void TestAboutButtonNoBlackBorder()
     }
 }
 
+void TestSelectableCheckBoxLayers()
+{
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = 180;
+    info.bmiHeader.biHeight = -72;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* pixels = nullptr;
+    HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    HGDIOBJ old = SelectObject(dc, bitmap);
+    const RECT bounds{0, 0, 180, 72};
+    Ui::DrawSelectableCheckBox(dc, bounds, L"", Ui::SelectableVisual{true, true, false, false, false, 96});
+    Check(GetPixel(dc, 2, 36) == Ui::Window,
+          "selected checkbox should retain a white rounded outer frame");
+    Check(GetPixel(dc, 36, 36) == Ui::Primary,
+          "selected checkbox should use an inset pure-color rounded fill");
+    bool whiteInsideFill = false;
+    for (int y = 12; y < 60; ++y) {
+        for (int x = 12; x < 60; ++x) {
+            if (GetPixel(dc, x, y) == Ui::Window) whiteInsideFill = true;
+        }
+    }
+    Check(!whiteInsideFill, "selected checkbox fill must not contain a white check mark");
+    Ui::DrawSelectableCheckBox(dc, bounds, L"", Ui::SelectableVisual{true, true, false, false, true, 96});
+    Check(GetPixel(dc, 120, 36) == Ui::Window,
+          "checkbox focus must not add a separate full-control glow or outline");
+    SelectObject(dc, old);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+}
+
 void TestExecutableNameNormalizationTarget()
 {
     const auto directory = std::filesystem::absolute(std::filesystem::temp_directory_path() / L"CommandPanelNameTests");
@@ -449,6 +485,7 @@ int wmain()
     TestButtonLayout();
     TestAboutLayout();
     TestAboutButtonNoBlackBorder();
+    TestSelectableCheckBoxLayers();
     TestExecutableNameNormalizationTarget();
     Check(!LocalUpdateDiagnosticsEnabled(), "test and release targets must not enable local update diagnostics");
     TestRealEditControls();

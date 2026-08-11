@@ -8,23 +8,6 @@
 namespace {
 constexpr wchar_t HotProperty[] = L"CommandPanel.OwnerDrawHot";
 
-void DrawCheckMark(HDC dc, const RECT& box, UINT dpi)
-{
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, Ui::Scale(2, dpi)), RGB(255, 255, 255));
-    HGDIOBJ previous = SelectObject(dc, pen);
-    MoveToEx(dc, box.left + Ui::Scale(4, dpi), box.top + Ui::Scale(9, dpi), nullptr);
-    LineTo(dc, box.left + Ui::Scale(8, dpi), box.bottom - Ui::Scale(5, dpi));
-    LineTo(dc, box.right - Ui::Scale(4, dpi), box.top + Ui::Scale(5, dpi));
-    SelectObject(dc, previous);
-    DeleteObject(pen);
-}
-
-void DrawFocusRing(HDC dc, RECT bounds, UINT dpi)
-{
-    InflateRect(&bounds, -Ui::Scale(2, dpi), -Ui::Scale(2, dpi));
-    Ui::DrawRoundedRect(dc, bounds, Ui::Primary, Ui::Primary, Ui::Scale(7, dpi));
-}
-
 LRESULT CALLBACK ButtonSubclass(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
                                 UINT_PTR, DWORD_PTR)
 {
@@ -91,6 +74,18 @@ void DrawRoundedRect(HDC dc, RECT rect, COLORREF fill, COLORREF border, int radi
     DeleteObject(brush);
 }
 
+void DrawFocusOutline(HDC dc, RECT rect, UINT dpi, int radius)
+{
+    InflateRect(&rect, -std::max(1, Scale(1, dpi)), -std::max(1, Scale(1, dpi)));
+    HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(1, dpi)), Primary);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, Scale(radius, dpi), Scale(radius, dpi));
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+}
+
 void ApplyRoundedRegion(HWND window, int width, int height, int radius)
 {
     if (window == nullptr || width <= 0 || height <= 0) return;
@@ -117,15 +112,19 @@ void DrawSelectableCheckBox(HDC dc, RECT bounds, std::wstring_view text,
     HBRUSH background = CreateSolidBrush(Window);
     FillRect(dc, &bounds, background);
     DeleteObject(background);
-    if (visual.focused && visual.enabled) DrawFocusRing(dc, bounds, visual.dpi);
     const int available = static_cast<int>(std::min(bounds.right - bounds.left, bounds.bottom - bounds.top));
     const int side = std::max(Scale(17, visual.dpi), available - Scale(4, visual.dpi));
     RECT box{bounds.left + Scale(1, visual.dpi), (bounds.top + bounds.bottom - side) / 2,
              bounds.left + Scale(1, visual.dpi) + side, (bounds.top + bounds.bottom + side) / 2};
-    const COLORREF fill = !visual.enabled ? RGB(238, 241, 245) : (visual.selected ? Primary : Window);
-    const COLORREF border = visual.selected ? Primary : (visual.hot || visual.focused ? Primary : Border);
-    DrawRoundedRect(dc, box, fill, border, Scale(4, visual.dpi));
-    if (visual.selected) DrawCheckMark(dc, box, visual.dpi);
+    const COLORREF fill = !visual.enabled ? RGB(238, 241, 245) : Window;
+    const COLORREF border = visual.selected || visual.hot || visual.focused ? Primary : Border;
+    DrawRoundedRect(dc, box, fill, border, Scale(6, visual.dpi));
+    if (visual.selected) {
+        RECT inner = box;
+        const int inset = std::max(1, Scale(3, visual.dpi));
+        InflateRect(&inner, -inset, -inset);
+        DrawRoundedRect(dc, inner, Primary, Primary, std::max(1, Scale(4, visual.dpi)));
+    }
     RECT label{box.right + Scale(8, visual.dpi), bounds.top, bounds.right, bounds.bottom};
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, visual.enabled ? Text : TextMuted);
@@ -144,6 +143,7 @@ void DrawSelectableOption(HDC dc, RECT bounds, std::wstring_view text,
     SetTextColor(dc, !visual.enabled ? TextMuted : (visual.selected ? RGB(255, 255, 255) : Text));
     DrawTextW(dc, text.data(), static_cast<int>(text.size()), &bounds,
               DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    if (visual.focused && visual.enabled) DrawFocusOutline(dc, bounds, visual.dpi);
 }
 
 void TrackOwnerDrawButton(HWND button)

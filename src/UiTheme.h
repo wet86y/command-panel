@@ -38,6 +38,7 @@ HFONT CreateFont(UINT dpi, int pointSize, int weight = FW_NORMAL,
                  const wchar_t* family = L"Segoe UI");
 void DrawRoundedRect(HDC dc, RECT rect, COLORREF fill, COLORREF border, int radius,
                      int penStyle = PS_SOLID);
+void DrawFocusOutline(HDC dc, RECT rect, UINT dpi, int radius = 7);
 void ApplyRoundedRegion(HWND window, int width, int height, int radius);
 void EnableRoundedCorners(HWND window);
 
