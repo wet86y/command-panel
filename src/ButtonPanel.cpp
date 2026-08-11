@@ -1,14 +1,17 @@
 #include "ButtonPanel.h"
+
+#include "UiScroll.h"
 #include "UiTheme.h"
 
+#include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace {
-constexpr int FirstButtonId = 1000;
-constexpr int AddButtonId = 0x7FFF;
-
+constexpr UINT_PTR ScrollHideTimer = 1;
+constexpr UINT ScrollHideDelayMs = 1200;
 }
 
 ButtonPanel::~ButtonPanel()
@@ -25,17 +28,17 @@ bool ButtonPanel::Create(HWND parent)
         wc.lpfnWndProc = ButtonPanel::WndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = className;
-        RegisterClassW(&wc);
+        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
         registered = true;
     }
-    hwnd_ = CreateWindowExW(0, className, nullptr,
-                            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP,
+    hwnd_ = CreateWindowExW(0, className, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                             0, 0, 0, 0, parent, nullptr, GetModuleHandleW(nullptr), this);
+    if (hwnd_ == nullptr) return false;
     fontDpi_ = GetDpiForWindow(hwnd_);
     font_ = Ui::CreateFont(fontDpi_, 9);
-    return hwnd_ != nullptr;
+    return true;
 }
 
 void ButtonPanel::SetCallbacks(ClickCallback click, ContextCallback context)
@@ -51,64 +54,83 @@ void ButtonPanel::SetButtons(const std::vector<CommandButton>& buttons)
 
 void ButtonPanel::Rebuild(const std::vector<CommandButton>& buttons)
 {
-    for (HWND control : controls_) DestroyWindow(control);
-    controls_.clear();
-    enabled_.clear();
-    for (size_t i = 0; i < buttons.size(); ++i) {
-        HWND control = CreateWindowExW(0, L"BUTTON", buttons[i].name.c_str(),
-                                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_TEXT | BS_OWNERDRAW,
-                                       0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(FirstButtonId + static_cast<int>(i))),
-                                       GetModuleHandleW(nullptr), nullptr);
-        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
-        Ui::TrackOwnerDrawButton(control);
-        controls_.push_back(control);
-        enabled_.push_back(buttons[i].enabled);
-    }
-    HWND add = CreateWindowExW(0, L"BUTTON", L"+ 添加按钮", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
-                               0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(AddButtonId)), GetModuleHandleW(nullptr), nullptr);
-    SendMessageW(add, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
-    Ui::TrackOwnerDrawButton(add);
-    controls_.push_back(add);
-    enabled_.push_back(true);
+    buttons_ = buttons;
+    availability_.assign(buttons_.size(), true);
     scrollPosition_ = 0;
-    SetBusy(busy_);
+    wheelRemainder_ = 0;
+    hotIndex_ = -1;
+    pressedIndex_ = -1;
+    focusedIndex_ = buttons_.empty() ? 0 : std::min(focusedIndex_, static_cast<int>(buttons_.size()));
     Layout();
+}
+
+void ButtonPanel::SetAvailability(std::vector<bool> availability)
+{
+    availability_ = std::move(availability);
+    if (availability_.size() != buttons_.size()) availability_.assign(buttons_.size(), true);
+    if (!IsCardEnabled(pressedIndex_)) pressedIndex_ = -1;
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void ButtonPanel::SetBusy(bool busy)
 {
+    if (busy_ == busy) return;
     busy_ = busy;
-    for (size_t i = 0; i < controls_.size(); ++i) {
-        const bool isAdd = i + 1 == controls_.size();
-        EnableWindow(controls_[i], isAdd ? TRUE : (enabled_[i] && !busy_));
+    if (!IsCardEnabled(pressedIndex_)) pressedIndex_ = -1;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool ButtonPanel::IsCardEnabled(int index) const
+{
+    if (index < 0 || index >= CardCount()) return false;
+    if (index == static_cast<int>(buttons_.size())) return true;
+    const std::size_t value = static_cast<std::size_t>(index);
+    return buttons_[value].enabled && !busy_ &&
+           (value >= availability_.size() || availability_[value]);
+}
+
+int ButtonPanel::HitTest(POINT point) const
+{
+    for (std::size_t index = 0; index < layout_.cards.size(); ++index) {
+        if (PtInRect(&layout_.cards[index], point)) return static_cast<int>(index);
     }
-}
-
-void ButtonPanel::SetResizeSuspended(bool suspended)
-{
-    resizeSuspended_ = suspended;
-    if (!resizeSuspended_) Layout();
-}
-
-int ButtonPanel::ButtonIndex(HWND button) const
-{
-    for (size_t i = 0; i < controls_.size(); ++i) if (controls_[i] == button) return static_cast<int>(i);
     return -1;
 }
 
-void ButtonPanel::ScrollTo(int position)
+void ButtonPanel::ShowScrollIndicator()
 {
-    SCROLLINFO info{sizeof(info), SIF_ALL};
-    GetScrollInfo(hwnd_, SB_VERT, &info);
-    const int maxPosition = std::max(0, info.nMax - static_cast<int>(info.nPage) + 1);
-    scrollPosition_ = std::clamp(position, 0, maxPosition);
-    SetScrollPos(hwnd_, SB_VERT, scrollPosition_, TRUE);
-    Layout();
+    if (layout_.maximumScroll <= 0) {
+        HideScrollIndicator();
+        return;
+    }
+    scrollIndicatorVisible_ = true;
+    SetTimer(hwnd_, ScrollHideTimer, ScrollHideDelayMs, nullptr);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void ButtonPanel::HideScrollIndicator()
+{
+    KillTimer(hwnd_, ScrollHideTimer);
+    if (!scrollIndicatorVisible_) return;
+    scrollIndicatorVisible_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void ButtonPanel::ScrollTo(int position, bool revealIndicator)
+{
+    const int next = std::clamp(position, 0, layout_.maximumScroll);
+    const bool changed = next != scrollPosition_;
+    scrollPosition_ = next;
+    if (changed) {
+        hotIndex_ = -1;
+        Layout();
+    }
+    if (revealIndicator && (changed || layout_.maximumScroll > 0)) ShowScrollIndicator();
 }
 
 void ButtonPanel::Layout()
 {
-    if (hwnd_ == nullptr || resizeSuspended_) return;
+    if (hwnd_ == nullptr) return;
     RECT client{};
     GetClientRect(hwnd_, &client);
     const UINT dpi = GetDpiForWindow(hwnd_);
@@ -116,38 +138,17 @@ void ButtonPanel::Layout()
         if (font_ != nullptr) DeleteObject(font_);
         fontDpi_ = dpi;
         font_ = Ui::CreateFont(dpi, 9);
-        for (HWND control : controls_)
-            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     }
-    const int margin = Ui::Scale(12, dpi);
-    const int gap = Ui::Scale(14, dpi);
-    const int height = Ui::CompactScale(64, dpi);
-    const int widthLimit = std::max(100, static_cast<int>(client.right) - margin * 2);
-    const int columns = widthLimit >= Ui::Scale(760, dpi)
-        ? 4 : std::max(1, (widthLimit + gap) / (Ui::Scale(180, dpi) + gap));
-    const int slotWidth = std::max(100, (widthLimit - gap * (columns - 1)) / columns);
-    const int cardInset = std::min(Ui::Scale(10, dpi), std::max(0, (slotWidth - 100) / 2));
-    const int cardWidth = std::max(100, slotWidth - cardInset * 2);
-    HDC dc = GetDC(hwnd_);
-    HFONT old = static_cast<HFONT>(SelectObject(dc, font_));
-    int x = margin;
-    int y = margin - scrollPosition_;
-    for (size_t index = 0; index < controls_.size(); ++index) {
-        const int column = static_cast<int>(index % columns);
-        const int row = static_cast<int>(index / columns);
-        x = margin + column * (slotWidth + gap) + (slotWidth - cardWidth) / 2;
-        y = margin + row * (height + gap) - scrollPosition_;
-        MoveWindow(controls_[index], x, y, cardWidth, height, TRUE);
+    layout_ = CalculateButtonLayout(client.right, client.bottom, dpi,
+                                    static_cast<std::size_t>(CardCount()), scrollPosition_);
+    const int clamped = std::clamp(scrollPosition_, 0, layout_.maximumScroll);
+    if (clamped != scrollPosition_) {
+        scrollPosition_ = clamped;
+        layout_ = CalculateButtonLayout(client.right, client.bottom, dpi,
+                                        static_cast<std::size_t>(CardCount()), scrollPosition_);
     }
-    SelectObject(dc, old);
-    ReleaseDC(hwnd_, dc);
-    int contentHeight = y + height + margin + scrollPosition_;
-    SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS};
-    info.nMin = 0;
-    info.nMax = std::max(static_cast<int>(client.bottom), contentHeight) - 1;
-    info.nPage = static_cast<UINT>(std::max(0, static_cast<int>(client.bottom)));
-    info.nPos = scrollPosition_;
-    SetScrollInfo(hwnd_, SB_VERT, &info, TRUE);
+    if (layout_.maximumScroll == 0) HideScrollIndicator();
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 LRESULT CALLBACK ButtonPanel::WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -158,7 +159,8 @@ LRESULT CALLBACK ButtonPanel::WndProc(HWND hwnd, UINT message, WPARAM wParam, LP
         self->hwnd_ = hwnd;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     }
-    return self ? self->HandleMessage(message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
+    return self ? self->HandleMessage(message, wParam, lParam) :
+                  DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
 LRESULT ButtonPanel::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
@@ -168,75 +170,170 @@ LRESULT ButtonPanel::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 1;
     case WM_PAINT: {
         PAINTSTRUCT paint{};
-        HDC dc = BeginPaint(hwnd_, &paint);
+        HDC target = BeginPaint(hwnd_, &paint);
         RECT client{};
         GetClientRect(hwnd_, &client);
+        HDC dc = nullptr;
+        HPAINTBUFFER buffer = BeginBufferedPaint(target, &client, BPBF_COMPATIBLEBITMAP, nullptr, &dc);
+        if (buffer == nullptr) dc = target;
+
         HBRUSH background = CreateSolidBrush(Ui::Window);
         FillRect(dc, &client, background);
         DeleteObject(background);
+        HFONT previousFont = static_cast<HFONT>(SelectObject(dc, font_));
+        SetBkMode(dc, TRANSPARENT);
+        const bool panelFocused = GetFocus() == hwnd_;
+        for (std::size_t index = 0; index < layout_.cards.size(); ++index) {
+            RECT rect = layout_.cards[index];
+            RECT visible{};
+            if (!IntersectRect(&visible, &rect, &client)) continue;
+            const int cardIndex = static_cast<int>(index);
+            const bool isAdd = cardIndex == static_cast<int>(buttons_.size());
+            const bool enabled = IsCardEnabled(cardIndex);
+            const bool selected = pressedIndex_ == cardIndex && hotIndex_ == cardIndex;
+            const bool hot = hotIndex_ == cardIndex;
+            const bool focused = panelFocused && focusedIndex_ == cardIndex;
+            const COLORREF fill = !enabled ? RGB(239, 242, 246) :
+                (selected ? RGB(224, 234, 248) : (hot ? RGB(235, 240, 246) : Ui::Surface));
+            const COLORREF border = isAdd ? RGB(137, 177, 237) :
+                (focused || hot ? Ui::BorderStrong : Ui::Border);
+            Ui::DrawRoundedRect(dc, rect, fill, border, Ui::Scale(12, fontDpi_),
+                                isAdd ? PS_DASH : PS_SOLID);
+            SetTextColor(dc, !enabled ? RGB(155, 160, 170) : (isAdd ? Ui::Primary : Ui::Text));
+            const wchar_t* text = isAdd ? L"+ 添加按钮" : buttons_[index].name.c_str();
+            DrawTextW(dc, text, -1, &rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+        SelectObject(dc, previousFont);
+
+        if (scrollIndicatorVisible_ && layout_.maximumScroll > 0) {
+            const int inset = Ui::Scale(6, fontDpi_);
+            const int trackHeight = std::max(1, static_cast<int>(client.bottom) - inset * 2);
+            const UiScroll::Metrics metrics{0, std::max(0, layout_.contentHeight - 1),
+                                            static_cast<UINT>(std::max(0L, client.bottom)), scrollPosition_};
+            const UiScroll::Thumb thumb = UiScroll::CalculateThumb(
+                metrics, trackHeight, Ui::Scale(18, fontDpi_));
+            if (thumb.visible) {
+                const int width = std::max(2, Ui::Scale(4, fontDpi_));
+                RECT thumbRect{client.right - inset - width, inset + thumb.top,
+                               client.right - inset, inset + thumb.top + thumb.height};
+                Ui::DrawRoundedRect(dc, thumbRect, RGB(100, 116, 139), RGB(100, 116, 139), width);
+            }
+        }
+
+        if (buffer != nullptr) EndBufferedPaint(buffer, TRUE);
         EndPaint(hwnd_, &paint);
         return 0;
     }
     case WM_SIZE:
-        if (!resizeSuspended_) Layout();
+        Layout();
         return 0;
-    case WM_VSCROLL: {
-        SCROLLINFO info{sizeof(info), SIF_ALL};
-        GetScrollInfo(hwnd_, SB_VERT, &info);
-        int position = info.nPos;
-        switch (LOWORD(wParam)) {
-        case SB_LINEUP: --position; break;
-        case SB_LINEDOWN: ++position; break;
-        case SB_PAGEUP: position -= static_cast<int>(info.nPage); break;
-        case SB_PAGEDOWN: position += static_cast<int>(info.nPage); break;
-        case SB_THUMBTRACK: position = info.nTrackPos; break;
-        default: break;
-        }
-        ScrollTo(position);
+    case WM_MOUSEWHEEL: {
+        const UiScroll::WheelAction action = UiScroll::AccumulateWheel(
+            GET_WHEEL_DELTA_WPARAM(wParam), UiScroll::SystemWheelScrollLines(), wheelRemainder_);
+        int delta = 0;
+        RECT client{};
+        GetClientRect(hwnd_, &client);
+        if (action.pages != 0) delta = -action.pages * std::max(1, static_cast<int>(client.bottom));
+        else delta = -action.lines * Ui::Scale(10, GetDpiForWindow(hwnd_));
+        if (delta != 0) ScrollTo(scrollPosition_ + delta, true);
+        else if (layout_.maximumScroll > 0) ShowScrollIndicator();
         return 0;
     }
-    case WM_MOUSEWHEEL:
-        ScrollTo(scrollPosition_ - GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA * 30);
+    case WM_MOUSEMOVE: {
+        if (!trackingMouse_) {
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, hwnd_, 0};
+            TrackMouseEvent(&tracking);
+            trackingMouse_ = true;
+        }
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const int next = HitTest(point);
+        if (next != hotIndex_) {
+            hotIndex_ = next;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         return 0;
-    case WM_COMMAND:
-        if (HIWORD(wParam) == BN_CLICKED) {
-            const int id = LOWORD(wParam);
-            if (clickCallback_) clickCallback_(id == AddButtonId ? -1 : id - FirstButtonId);
+    }
+    case WM_MOUSELEAVE:
+        trackingMouse_ = false;
+        hotIndex_ = -1;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return 0;
+    case WM_LBUTTONDOWN: {
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const int index = HitTest(point);
+        if (IsCardEnabled(index)) {
+            SetFocus(hwnd_);
+            SetCapture(hwnd_);
+            pressedIndex_ = index;
+            focusedIndex_ = index;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        const int pressed = pressedIndex_;
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const int released = HitTest(point);
+        pressedIndex_ = -1;
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        if (pressed >= 0 && pressed == released && IsCardEnabled(pressed) && clickCallback_)
+            clickCallback_(pressed == static_cast<int>(buttons_.size()) ? -1 : pressed);
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        if (pressedIndex_ != -1) {
+            pressedIndex_ = -1;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+        return 0;
+    case WM_CONTEXTMENU: {
+        POINT screenPoint{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        int index = -1;
+        if (screenPoint.x == -1 && screenPoint.y == -1) {
+            index = focusedIndex_;
+            if (index >= 0 && index < static_cast<int>(layout_.cards.size())) {
+                const RECT& rect = layout_.cards[static_cast<std::size_t>(index)];
+                screenPoint = POINT{(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+                ClientToScreen(hwnd_, &screenPoint);
+            }
+        } else {
+            POINT clientPoint = screenPoint;
+            ScreenToClient(hwnd_, &clientPoint);
+            index = HitTest(clientPoint);
+        }
+        if (index >= 0 && index < static_cast<int>(buttons_.size()) && contextCallback_)
+            contextCallback_(index, screenPoint);
+        return 0;
+    }
+    case WM_KEYDOWN: {
+        if (focusedIndex_ < 0) focusedIndex_ = 0;
+        int next = focusedIndex_;
+        if (wParam == VK_LEFT) --next;
+        else if (wParam == VK_RIGHT) ++next;
+        else if (wParam == VK_UP) next -= layout_.columns;
+        else if (wParam == VK_DOWN) next += layout_.columns;
+        else if ((wParam == VK_RETURN || wParam == VK_SPACE) && IsCardEnabled(focusedIndex_)) {
+            if (clickCallback_)
+                clickCallback_(focusedIndex_ == static_cast<int>(buttons_.size()) ? -1 : focusedIndex_);
+            return 0;
+        } else {
+            break;
+        }
+        focusedIndex_ = std::clamp(next, 0, std::max(0, CardCount() - 1));
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return 0;
+    }
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return 0;
+    case WM_TIMER:
+        if (wParam == ScrollHideTimer) {
+            HideScrollIndicator();
             return 0;
         }
         break;
-    case WM_DRAWITEM: {
-        auto* item = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-        if (item == nullptr || item->CtlType != ODT_BUTTON) break;
-        RECT rect = item->rcItem;
-        const bool selected = (item->itemState & ODS_SELECTED) != 0;
-        const bool disabled = (item->itemState & ODS_DISABLED) != 0;
-        const bool hot = Ui::IsControlHot(item->hwndItem);
-        const bool focused = (item->itemState & ODS_FOCUS) != 0;
-        const bool isAdd = item->CtlID == AddButtonId;
-        const COLORREF fill = disabled ? RGB(239, 242, 246) :
-            (selected ? RGB(224, 234, 248) : (hot ? RGB(235, 240, 246) : Ui::Surface));
-        const COLORREF border = isAdd ? RGB(137, 177, 237) :
-            (focused || hot ? Ui::BorderStrong : Ui::Border);
-        Ui::DrawRoundedRect(item->hDC, rect, fill, border, 12,
-                            isAdd ? PS_DASH : PS_SOLID);
-        wchar_t text[512]{};
-        GetWindowTextW(item->hwndItem, text, 512);
-        SetBkMode(item->hDC, TRANSPARENT);
-        SetTextColor(item->hDC, disabled ? RGB(155, 160, 170) : (isAdd ? Ui::Primary : Ui::Text));
-        DrawTextW(item->hDC, text, -1, &rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        return TRUE;
-    }
-    case WM_CONTEXTMENU: {
-        HWND control = reinterpret_cast<HWND>(wParam);
-        const int index = ButtonIndex(control);
-        if (index >= 0 && index + 1 < static_cast<int>(controls_.size()) && contextCallback_) {
-            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            if (point.x == -1 && point.y == -1) { GetCursorPos(&point); }
-            contextCallback_(index, point);
-        }
-        return 0;
-    }
     }
     return DefWindowProcW(hwnd_, message, wParam, lParam);
 }

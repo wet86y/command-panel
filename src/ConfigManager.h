@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TerminalTypes.h"
+
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -11,6 +13,7 @@ struct CommandButton
     std::wstring command;
     bool confirm = false;
     bool enabled = true;
+    TerminalKind terminal = TerminalKind::PowerShell;
 };
 
 struct CommandTab
@@ -26,12 +29,13 @@ struct UiState
     int windowHeight = 0;
     int buttonSectionHeight = 0;
     int inputSectionHeight = 0;
+    TerminalKind activeTerminal = TerminalKind::PowerShell;
 };
 
 class ConfigManager
 {
 public:
-    ConfigManager();
+    explicit ConfigManager(std::filesystem::path overridePath = {});
 
     bool Load();
     bool Save();

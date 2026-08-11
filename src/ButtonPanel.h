@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ButtonLayout.h"
 #include "ConfigManager.h"
 
 #include <windows.h>
@@ -19,24 +20,34 @@ public:
     void SetCallbacks(ClickCallback click, ContextCallback context);
     void SetButtons(const std::vector<CommandButton>& buttons);
     void SetBusy(bool busy);
-    void SetResizeSuspended(bool suspended);
+    void SetAvailability(std::vector<bool> availability);
     void Layout();
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT HandleMessage(UINT, WPARAM, LPARAM);
-    int ButtonIndex(HWND button) const;
     void Rebuild(const std::vector<CommandButton>& buttons);
-    void ScrollTo(int position);
+    void ScrollTo(int position, bool revealIndicator);
+    void ShowScrollIndicator();
+    void HideScrollIndicator();
+    int HitTest(POINT point) const;
+    bool IsCardEnabled(int index) const;
+    int CardCount() const { return static_cast<int>(buttons_.size()) + 1; }
 
     HWND hwnd_ = nullptr;
     HFONT font_ = nullptr;
     UINT fontDpi_ = 0;
-    std::vector<HWND> controls_;
-    std::vector<bool> enabled_;
+    std::vector<CommandButton> buttons_;
+    std::vector<bool> availability_;
+    ButtonLayoutResult layout_;
     ClickCallback clickCallback_;
     ContextCallback contextCallback_;
     bool busy_ = false;
-    bool resizeSuspended_ = false;
+    bool trackingMouse_ = false;
+    bool scrollIndicatorVisible_ = false;
     int scrollPosition_ = 0;
+    int wheelRemainder_ = 0;
+    int hotIndex_ = -1;
+    int pressedIndex_ = -1;
+    int focusedIndex_ = -1;
 };

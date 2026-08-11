@@ -11,6 +11,8 @@ namespace {
 constexpr int IdName = 101;
 constexpr int IdCommand = 102;
 constexpr int IdConfirm = 103;
+constexpr int IdPowerShell = 104;
+constexpr int IdWsl = 105;
 constexpr int IdClose = 106;
 
 enum class DialogMode { Editor, Name, Confirm };
@@ -22,6 +24,9 @@ struct State
     HWND name = nullptr;
     HWND command = nullptr;
     HWND confirm = nullptr;
+    HWND terminalLabel = nullptr;
+    HWND powerShell = nullptr;
+    HWND wsl = nullptr;
     HWND nameLabel = nullptr;
     HWND commandLabel = nullptr;
     HWND message = nullptr;
@@ -37,6 +42,7 @@ struct State
     DialogMode mode = DialogMode::Editor;
     CommandButton initial;
     CommandButton result;
+    TerminalKind selectedTerminal = TerminalKind::PowerShell;
     std::wstring title;
     std::wstring messageText;
     std::wstring primaryText = L"保存";
@@ -62,6 +68,9 @@ void RecreateFonts(State& state)
     SetFont(state.name, state.bodyFont);
     SetFont(state.command, state.monoFont);
     SetFont(state.confirm, state.bodyFont);
+    SetFont(state.terminalLabel, state.labelFont);
+    SetFont(state.powerShell, state.bodyFont);
+    SetFont(state.wsl, state.bodyFont);
     SetFont(state.nameLabel, state.labelFont);
     SetFont(state.commandLabel, state.labelFont);
     SetFont(state.message, state.bodyFont);
@@ -72,7 +81,7 @@ void RecreateFonts(State& state)
 
 SIZE DialogSize(const State& state)
 {
-    if (state.mode == DialogMode::Editor) return SIZE{S(state, 560), S(state, 430)};
+    if (state.mode == DialogMode::Editor) return SIZE{S(state, 560), S(state, 490)};
     if (state.mode == DialogMode::Name) return SIZE{S(state, 520), S(state, 250)};
     return SIZE{S(state, 520), S(state, 280)};
 }
@@ -87,7 +96,7 @@ void Layout(State& state)
     const int buttonWidth = S(state, 92);
     const int buttonHeight = S(state, 36);
     const int buttonGap = S(state, 10);
-    const int footerTop = state.mode == DialogMode::Editor ? S(state, 356) :
+    const int footerTop = state.mode == DialogMode::Editor ? S(state, 416) :
                           state.mode == DialogMode::Name ? S(state, 176) : S(state, 194);
     const int buttonY = footerTop + (height - footerTop - buttonHeight) / 2;
 
@@ -101,8 +110,12 @@ void Layout(State& state)
         MoveWindow(state.name, margin + S(state, 12), S(state, 105), width - margin * 2 - S(state, 24), S(state, 24), TRUE);
         MoveWindow(state.commandLabel, margin, S(state, 154), width - margin * 2, S(state, 22), TRUE);
         MoveWindow(state.command, margin + S(state, 12), S(state, 184), width - margin * 2 - S(state, 24), S(state, 105), TRUE);
-        MoveWindow(state.confirm, margin, S(state, 306), S(state, 220), S(state, 28), TRUE);
-        MoveWindow(state.error, margin, S(state, 332), width - margin * 2, S(state, 20), TRUE);
+        MoveWindow(state.terminalLabel, margin, S(state, 306), S(state, 150), S(state, 22), TRUE);
+        const int terminalWidth = S(state, 135);
+        MoveWindow(state.powerShell, margin, S(state, 334), terminalWidth, S(state, 34), TRUE);
+        MoveWindow(state.wsl, margin + terminalWidth, S(state, 334), terminalWidth, S(state, 34), TRUE);
+        MoveWindow(state.confirm, margin, S(state, 376), S(state, 220), S(state, 28), TRUE);
+        MoveWindow(state.error, margin, S(state, 398), width - margin * 2, S(state, 20), TRUE);
     } else if (state.mode == DialogMode::Name) {
         MoveWindow(state.nameLabel, margin, S(state, 76), width - margin * 2, S(state, 22), TRUE);
         MoveWindow(state.name, margin + S(state, 12), S(state, 107), width - margin * 2 - S(state, 24), S(state, 24), TRUE);
@@ -151,6 +164,7 @@ void Accept(State& state)
     if (state.mode == DialogMode::Editor) {
         state.result.command = std::move(commandText);
         state.result.confirm = IsDlgButtonChecked(state.window, IdConfirm) == BST_CHECKED;
+        state.result.terminal = state.selectedTerminal;
     }
     state.accepted = true;
     DestroyWindow(state.window);
@@ -175,6 +189,19 @@ void DrawButton(const State& state, const DRAWITEMSTRUCT& item)
         MoveToEx(item.hDC, cx - arm, cy - arm, nullptr); LineTo(item.hDC, cx + arm + 1, cy + arm + 1);
         MoveToEx(item.hDC, cx + arm, cy - arm, nullptr); LineTo(item.hDC, cx - arm - 1, cy + arm + 1);
         SelectObject(item.hDC, old); DeleteObject(pen);
+        return;
+    }
+    if (item.CtlID == IdPowerShell || item.CtlID == IdWsl) {
+        const TerminalKind kind = item.CtlID == IdWsl ? TerminalKind::Wsl : TerminalKind::PowerShell;
+        const bool checked = state.selectedTerminal == kind;
+        const COLORREF selectedColor = kind == TerminalKind::Wsl ? Ui::Success : Ui::Primary;
+        const COLORREF fill = checked ? selectedColor : (hot ? Ui::SurfaceHover : Ui::Window);
+        const COLORREF border = checked ? selectedColor : Ui::BorderStrong;
+        Ui::DrawRoundedRect(item.hDC, rect, fill, border, S(state, 7));
+        wchar_t text[64]{}; GetWindowTextW(item.hwndItem, text, 64);
+        SetBkMode(item.hDC, TRANSPARENT);
+        SetTextColor(item.hDC, checked ? RGB(255,255,255) : Ui::Text);
+        DrawTextW(item.hDC, text, -1, &rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
         return;
     }
     if (item.CtlID == IdConfirm) {
@@ -258,6 +285,18 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                                                  0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdConfirm)), GetModuleHandleW(nullptr), nullptr);
                 CheckDlgButton(hwnd, IdConfirm, state->initial.confirm ? BST_CHECKED : BST_UNCHECKED);
                 Ui::TrackOwnerDrawButton(state->confirm);
+                state->terminalLabel = CreateWindowExW(0, L"STATIC", L"执行终端", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                                        0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+                state->powerShell = CreateWindowExW(0, L"BUTTON", L"PowerShell",
+                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_OWNERDRAW,
+                                                     0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdPowerShell)), GetModuleHandleW(nullptr), nullptr);
+                state->wsl = CreateWindowExW(0, L"BUTTON", L"WSL",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_OWNERDRAW,
+                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdWsl)), GetModuleHandleW(nullptr), nullptr);
+                CheckRadioButton(hwnd, IdPowerShell, IdWsl,
+                                 state->initial.terminal == TerminalKind::Wsl ? IdWsl : IdPowerShell);
+                state->selectedTerminal = state->initial.terminal;
+                Ui::TrackOwnerDrawButton(state->powerShell); Ui::TrackOwnerDrawButton(state->wsl);
             }
             SendMessageW(state->name, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(*state, 2), S(*state, 2)));
         }
@@ -272,7 +311,7 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         HDC dc = BeginPaint(hwnd, &paint);
         RECT client{}; GetClientRect(hwnd, &client);
         HBRUSH white = CreateSolidBrush(Ui::Window); FillRect(dc, &client, white); DeleteObject(white);
-        const int footerTop = state->mode == DialogMode::Editor ? S(*state, 356) :
+        const int footerTop = state->mode == DialogMode::Editor ? S(*state, 416) :
                               state->mode == DialogMode::Name ? S(*state, 176) : S(*state, 194);
         RECT footer{0, footerTop, client.right, client.bottom};
         HBRUSH footerBrush = CreateSolidBrush(Ui::Surface); FillRect(dc, &footer, footerBrush); DeleteObject(footerBrush);
@@ -324,6 +363,13 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             const UINT next = IsDlgButtonChecked(hwnd, IdConfirm) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED;
             CheckDlgButton(hwnd, IdConfirm, next);
             InvalidateRect(state->confirm, nullptr, FALSE);
+            return 0;
+        }
+        if ((LOWORD(wParam) == IdPowerShell || LOWORD(wParam) == IdWsl) && HIWORD(wParam) == BN_CLICKED) {
+            state->selectedTerminal = LOWORD(wParam) == IdWsl ? TerminalKind::Wsl : TerminalKind::PowerShell;
+            CheckRadioButton(hwnd, IdPowerShell, IdWsl, LOWORD(wParam));
+            InvalidateRect(state->powerShell, nullptr, FALSE);
+            InvalidateRect(state->wsl, nullptr, FALSE);
             return 0;
         }
         if ((LOWORD(wParam) == IdName || LOWORD(wParam) == IdCommand) && HIWORD(wParam) == EN_CHANGE) {

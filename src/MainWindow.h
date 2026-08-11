@@ -5,32 +5,44 @@
 #include "ConfigManager.h"
 #include "TerminalParser.h"
 #include "TerminalSession.h"
+#include "TerminalTypes.h"
+#include "TerminalView.h"
 #include "TabBar.h"
 
 #include <windows.h>
 
 #include <string>
+#include <array>
+#include <memory>
+#include <optional>
 #include <vector>
 
 constexpr UINT WM_APP_TERMINAL_OUTPUT = WM_APP + 1;
 constexpr UINT WM_APP_TERMINAL_EXITED = WM_APP + 2;
-constexpr UINT WM_APP_RESTART_TIMER = 1;
+constexpr UINT WM_APP_INPUT_SCROLLED = WM_APP + 4;
+constexpr UINT WM_APP_REFRESH_SCROLLS = WM_APP + 6;
+constexpr UINT WM_APP_RESTART_TIMER_PS = 10;
+constexpr UINT WM_APP_RESTART_TIMER_WSL = 11;
+constexpr UINT WM_APP_INPUT_SCROLL_HIDE_TIMER = 3;
 
 struct TerminalOutputPacket
 {
+    TerminalKind kind;
     uint64_t generation;
     std::wstring text;
 };
 
 struct TerminalExitPacket
 {
+    TerminalKind kind;
     uint64_t generation;
 };
 
 class MainWindow
 {
 public:
-    MainWindow();
+    explicit MainWindow(bool elevated, std::optional<TerminalKind> startupTerminal = std::nullopt,
+                        std::wstring startupCommand = {});
     ~MainWindow();
 
     bool Create(HINSTANCE instance);
@@ -45,6 +57,7 @@ private:
     void Layout();
     void RecreateFonts();
     void CalculateTerminalGrid(short& columns, short& rows) const;
+    void SwitchTerminal(TerminalKind kind, bool focus = true);
     void RefreshTabs();
     void RefreshButtons();
     void OnTabSelected(int index);
@@ -55,13 +68,23 @@ private:
     void OnContext(int index, POINT point);
     void ExecuteButton(int index);
     void ExecuteInput();
-    void AppendOutput(std::wstring_view text);
+    bool ExecuteManagedCommand(TerminalKind kind, const std::wstring& command, bool elevateWsl = false);
+    bool RequestElevationIfNeeded(TerminalKind kind, std::wstring_view output);
+    bool LaunchElevatedTerminal(TerminalKind kind);
+    void AppendOutput(TerminalKind kind, std::wstring_view text);
+    void ShowInputScrollBar();
+    void HideInputScrollBar();
+    bool HandleTextWheel(HWND target, int& remainder, WPARAM wParam);
+    void RefreshVisibleScrollIndicators();
+    void ShowScrollIndicator(HWND target, HWND indicator, UINT timer);
+    void HideScrollIndicator(HWND indicator, UINT timer);
+    static LRESULT CALLBACK ScrollIndicatorProc(HWND, UINT, WPARAM, LPARAM);
     void ClearOutput();
     void ExitCommand();
     void SetStatus(const std::wstring& text);
-    void OnTerminalBytes(uint64_t generation, std::string bytes);
-    void OnTerminalExit(uint64_t generation);
-    bool StartTerminal();
+    void OnTerminalBytes(TerminalKind kind, uint64_t generation, std::string bytes);
+    void OnTerminalExit(TerminalKind kind, uint64_t generation);
+    bool StartTerminal(TerminalKind kind);
     void ResetTerminal(bool ask);
     void ShowContextMenu(int index, POINT point);
     void EditButton(int index);
@@ -74,14 +97,42 @@ private:
     void AddDiagnostic(const std::wstring& text);
     void PersistUiState();
 
+    struct TerminalContext
+    {
+        explicit TerminalContext(TerminalKind value) : kind(value), executor(session, value) {}
+        TerminalKind kind;
+        TerminalSession session;
+        CommandExecutor executor;
+        TerminalParser parser;
+        TerminalModel model;
+        std::vector<std::wstring> history;
+        int historyPosition = -1;
+        bool ready = false;
+        int restartAttempts = 0;
+        uint64_t generation = 0;
+        std::wstring currentCommand;
+        std::wstring permissionProbe;
+        bool elevationRequested = false;
+        bool linuxElevationPending = false;
+        bool windowsElevationRequired = false;
+        bool elevationOnFailure = false;
+    };
+    TerminalContext& Context(TerminalKind kind) { return *terminals_[TerminalIndex(kind)]; }
+    const TerminalContext& Context(TerminalKind kind) const { return *terminals_[TerminalIndex(kind)]; }
+    TerminalContext& CurrentTerminal() { return Context(activeTerminal_); }
+    const TerminalContext& CurrentTerminal() const { return Context(activeTerminal_); }
+
     HWND hwnd_ = nullptr;
-    HWND output_ = nullptr;
+    HWND outputHost_ = nullptr;
     HWND input_ = nullptr;
+    HWND inputHost_ = nullptr;
+    HWND inputScroll_ = nullptr;
     HWND runtimeState_ = nullptr;
     HWND title_ = nullptr;
     HWND adminMode_ = nullptr;
     HWND connection_ = nullptr;
-    HWND terminalTitle_ = nullptr;
+    HWND terminalPowerShell_ = nullptr;
+    HWND terminalWsl_ = nullptr;
     HWND clear_ = nullptr;
     HWND ctrlC_ = nullptr;
     HWND reset_ = nullptr;
@@ -103,17 +154,15 @@ private:
 
     TabBar tabBar_;
     ButtonPanel buttonPanel_;
+    TerminalView terminalView_;
     ConfigManager config_;
-    TerminalParser parser_;
-    TerminalSession session_;
-    CommandExecutor executor_;
-    std::vector<std::wstring> history_;
-    int historyPosition_ = -1;
+    std::array<std::unique_ptr<TerminalContext>, 2> terminals_;
+    int inputWheelRemainder_ = 0;
+    bool inputScrollVisible_ = false;
     bool shuttingDown_ = false;
-    bool terminalReady_ = false;
+    bool elevated_ = false;
     bool configLoadSucceeded_ = true;
-    int restartAttempts_ = 0;
-    uint64_t currentGeneration_ = 0;
+    TerminalKind activeTerminal_ = TerminalKind::PowerShell;
     int activeTab_ = 0;
     short terminalColumns_ = 120;
     short terminalRows_ = 30;
@@ -121,6 +170,8 @@ private:
     int inputSectionHeight_ = -1;
     int activeSplitter_ = 0;
     int hotSplitter_ = 0;
+    std::wstring startupCommand_;
+    std::optional<TerminalKind> startupTerminal_;
     int splitterDragOriginY_ = 0;
     int splitterDragOriginSize_ = 0;
     RECT upperSplitterRect_{};

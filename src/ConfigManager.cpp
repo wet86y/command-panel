@@ -51,7 +51,7 @@ public:
         }
         Skip();
         if (position_ != text_.size()) return Fail(L"配置末尾存在多余内容", error);
-        if (version != 1 && version != 2) return Fail(L"不支持的配置版本", error);
+        if (version != 1 && version != 2 && version != 3) return Fail(L"不支持的配置版本", error);
         if (!hasButtons && !hasTabs) return Fail(L"配置缺少 buttons 或 tabs", error);
         parsedTabsRoot = hasTabs;
         return true;
@@ -103,14 +103,18 @@ public:
         while (true) {
             std::string key;
             if (!String(key) || !Consume(':')) return Fail(L"ui 字段无效", error);
-            int value = 0;
             if (key == "window_width" || key == "window_height" ||
                 key == "button_section_height" || key == "input_section_height") {
+                int value = 0;
                 if (!Integer(value) || value < 0) return Fail(L"ui 尺寸必须是非负整数", error);
                 if (key == "window_width") ui.windowWidth = value;
                 else if (key == "window_height") ui.windowHeight = value;
                 else if (key == "button_section_height") ui.buttonSectionHeight = value;
                 else ui.inputSectionHeight = value;
+            } else if (key == "active_terminal") {
+                std::string value;
+                if (!String(value) || !ParseTerminalKind(value, ui.activeTerminal))
+                    return Fail(L"active_terminal 必须是 powershell 或 wsl", error);
             } else if (!SkipValue()) {
                 return Fail(L"无法跳过 ui 未知字段", error);
             }
@@ -239,11 +243,13 @@ private:
                 std::string key;
                 if (!String(key) || !Consume(':')) return Fail(L"按钮字段无效", error);
                 std::string value;
-                if (key == "id" || key == "name" || key == "command") {
+                if (key == "id" || key == "name" || key == "command" || key == "terminal") {
                     if (!String(value)) return Fail(L"按钮文本字段无效", error);
                     if (key == "id") { button.id = value; hasId = true; }
                     else if (key == "name") { button.name = Utf8ToWide(value); hasName = true; }
-                    else { button.command = Utf8ToWide(value); hasCommand = true; }
+                    else if (key == "command") { button.command = Utf8ToWide(value); hasCommand = true; }
+                    else if (!ParseTerminalKind(value, button.terminal))
+                        return Fail(L"按钮 terminal 必须是 powershell 或 wsl", error);
                 } else if (key == "confirm" || key == "enabled") {
                     bool boolean = false;
                     if (!Boolean(boolean)) return Fail(L"按钮布尔字段无效", error);
@@ -334,8 +340,13 @@ bool ReadFileUtf8(const std::filesystem::path& path, std::string& content, std::
 }
 }
 
-ConfigManager::ConfigManager()
+ConfigManager::ConfigManager(std::filesystem::path overridePath)
 {
+    if (!overridePath.empty()) {
+        path_ = std::move(overridePath);
+        legacyPath_ = path_;
+        return;
+    }
     wchar_t modulePath[MAX_PATH]{};
     const DWORD length = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
     legacyPath_ = std::filesystem::path(modulePath, modulePath + length).parent_path() / L"config.json";
@@ -436,11 +447,12 @@ bool ConfigManager::Save()
         lastError_ = L"无法创建配置目录：" + path_.parent_path().wstring();
         return false;
     }
-    std::string content = "{\n  \"version\": 2,\n  \"ui\": {\n";
+    std::string content = "{\n  \"version\": 3,\n  \"ui\": {\n";
     content += "    \"window_width\": " + std::to_string(ui_.windowWidth) + ",\n";
     content += "    \"window_height\": " + std::to_string(ui_.windowHeight) + ",\n";
     content += "    \"button_section_height\": " + std::to_string(ui_.buttonSectionHeight) + ",\n";
-    content += "    \"input_section_height\": " + std::to_string(ui_.inputSectionHeight) + "\n";
+    content += "    \"input_section_height\": " + std::to_string(ui_.inputSectionHeight) + ",\n";
+    content += "    \"active_terminal\": \"" + std::string(TerminalKindName(ui_.activeTerminal)) + "\"\n";
     content += "  },\n  \"tabs\": [\n";
     for (size_t tabIndex = 0; tabIndex < tabs_.size(); ++tabIndex) {
         const auto& tab = tabs_[tabIndex];
@@ -451,6 +463,7 @@ bool ConfigManager::Save()
             content += "        {\n          \"id\": " + EscapeJson(Utf8ToWide(button.id)) + ",\n";
             content += "          \"name\": " + EscapeJson(button.name) + ",\n";
             content += "          \"command\": " + EscapeJson(button.command) + ",\n";
+            content += "          \"terminal\": \"" + std::string(TerminalKindName(button.terminal)) + "\",\n";
             content += "          \"confirm\": " + std::string(button.confirm ? "true" : "false") + ",\n";
             content += "          \"enabled\": " + std::string(button.enabled ? "true" : "false") + "\n        }";
             if (i + 1 != tab.buttons.size()) content += ',';
@@ -497,15 +510,15 @@ std::vector<CommandTab> ConfigManager::DefaultTabs()
 {
     return {
         {"common", L"常用", {
-            {"openclaw-status", L"OpenClaw 状态", L"wsl.exe -- bash -lic \"openclaw gateway status\"", false, true},
+            {"openclaw-status", L"OpenClaw 状态", L"openclaw gateway status", false, true, TerminalKind::Wsl},
             {"wsl-status", L"WSL 状态", L"wsl.exe --status", false, true},
             {"wsl-shutdown", L"WSL Shutdown", L"wsl.exe --shutdown", true, true},
         }},
         {"openclaw", L"OpenClaw", {
-            {"openclaw-start", L"启动", L"wsl.exe -- bash -lic \"openclaw gateway start\"", false, true},
-            {"openclaw-restart", L"重启", L"wsl.exe -- bash -lic \"openclaw gateway restart\"", true, true},
-            {"openclaw-stop", L"停止", L"wsl.exe -- bash -lic \"openclaw gateway stop\"", true, true},
-            {"openclaw-doctor", L"Doctor", L"wsl.exe -- bash -lic \"openclaw doctor\"", false, true},
+            {"openclaw-start", L"启动", L"openclaw gateway start", false, true, TerminalKind::Wsl},
+            {"openclaw-restart", L"重启", L"openclaw gateway restart", true, true, TerminalKind::Wsl},
+            {"openclaw-stop", L"停止", L"openclaw gateway stop", true, true, TerminalKind::Wsl},
+            {"openclaw-doctor", L"Doctor", L"openclaw doctor", false, true, TerminalKind::Wsl},
         }},
         {"system", L"系统", {
             {"wsl-list", L"WSL 列表", L"wsl.exe -l -v", false, true},

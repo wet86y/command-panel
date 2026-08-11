@@ -11,16 +11,25 @@ add_executable(CommandPanel WIN32
     src/App.cpp
     src/MainWindow.cpp
     src/ButtonPanel.cpp
+    src/ButtonLayout.cpp
     src/TabBar.cpp
     src/CommandDialog.cpp
     src/CommandMenu.cpp
     src/ConfigManager.cpp
     src/TerminalSession.cpp
     src/TerminalParser.cpp
+    src/TerminalModel.cpp
+    src/TerminalView.cpp
     src/CommandExecutor.cpp
     src/Utf.cpp
     src/UiTheme.cpp
+    src/UiScroll.cpp
     resources/app.rc
+)
+
+set_target_properties(CommandPanel PROPERTIES
+    OUTPUT_NAME "快捷控制台"
+    PROJECT_LABEL "快捷控制台"
 )
 
 target_include_directories(CommandPanel PRIVATE src)
@@ -52,6 +61,7 @@ target_link_libraries(CommandPanel PRIVATE
     crypt32
     dwmapi
     gdiplus
+    uxtheme
 )
 
 if(MSVC)
@@ -60,4 +70,28 @@ if(MSVC)
         $<$<CONFIG:Release>:/OPT:REF>
         $<$<CONFIG:Release>:/OPT:ICF>
     )
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(CommandPanelUiTests
+        tests/UiScrollTests.cpp
+        src/UiScroll.cpp
+        src/ButtonLayout.cpp
+        src/UiTheme.cpp
+        src/TerminalModel.cpp
+        src/TerminalParser.cpp
+        src/ConfigManager.cpp
+        src/Utf.cpp
+    )
+    target_include_directories(CommandPanelUiTests PRIVATE src)
+    target_compile_definitions(CommandPanelUiTests PRIVATE
+        UNICODE
+        _UNICODE
+        _WIN32_WINNT=0x0A00
+        NOMINMAX
+    )
+    target_compile_options(CommandPanelUiTests PRIVATE /utf-8 /W4 /permissive-)
+    target_link_libraries(CommandPanelUiTests PRIVATE user32 gdi32 comctl32 dwmapi crypt32 shell32 ole32)
+    add_test(NAME CommandPanelUiTests COMMAND CommandPanelUiTests)
 endif()

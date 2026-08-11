@@ -13,6 +13,14 @@
 #include <string_view>
 #include <thread>
 
+struct TerminalLaunchSpec
+{
+    std::wstring executable;
+    std::wstring arguments;
+    std::wstring workingDirectory;
+    std::wstring displayName;
+};
+
 class TerminalSession
 {
 public:
@@ -26,7 +34,7 @@ public:
     TerminalSession& operator=(const TerminalSession&) = delete;
 
     void SetCallbacks(OutputCallback output, ExitCallback exited);
-    bool Start(short columns = 120, short rows = 30);
+    bool Start(const TerminalLaunchSpec& spec, short columns = 120, short rows = 30);
     void Stop();
     bool Restart(short columns = 120, short rows = 30);
     bool SendRaw(std::string_view utf8);
@@ -38,9 +46,10 @@ public:
 private:
     bool CreatePipes();
     bool CreatePseudoConsoleHost(short columns, short rows);
-    bool CreateShellProcess();
+    bool CreateShellProcess(const TerminalLaunchSpec& spec);
     void ReaderLoop(uint64_t generation);
     void WriterLoop();
+    void ProcessWaitLoop(uint64_t generation);
     void SetError(std::wstring message);
 
     HPCON hpc_ = nullptr;
@@ -53,14 +62,17 @@ private:
 
     std::thread readerThread_;
     std::thread writerThread_;
+    std::thread processWaiterThread_;
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
     std::deque<std::string> inputQueue_;
     std::mutex consoleMutex_;
     std::atomic_bool stopping_ = false;
     std::atomic_bool running_ = false;
+    std::atomic<ULONGLONG> lastOutputTick_ = 0;
     uint64_t generation_ = 0;
     std::wstring lastError_;
+    TerminalLaunchSpec launchSpec_;
     OutputCallback outputCallback_;
     ExitCallback exitCallback_;
 };

@@ -1,10 +1,11 @@
 {
-  "version": 2,
+  "version": 3,
   "ui": {
     "window_width": 0,
     "window_height": 0,
     "button_section_height": 0,
-    "input_section_height": 0
+    "input_section_height": 0,
+    "active_terminal": "powershell"
   },
   "tabs": [
     {
@@ -14,7 +15,8 @@
         {
           "id": "openclaw-status",
           "name": "OpenClaw 状态",
-          "command": "wsl.exe -- bash -lic \"openclaw gateway status\"",
+          "command": "openclaw gateway status",
+          "terminal": "wsl",
           "confirm": false,
           "enabled": true
         },
@@ -22,6 +24,7 @@
           "id": "wsl-status",
           "name": "WSL 状态",
           "command": "wsl.exe --status",
+          "terminal": "powershell",
           "confirm": false,
           "enabled": true
         },
@@ -29,6 +32,7 @@
           "id": "wsl-shutdown",
           "name": "WSL Shutdown",
           "command": "wsl.exe --shutdown",
+          "terminal": "powershell",
           "confirm": true,
           "enabled": true
         }
@@ -41,14 +45,16 @@
         {
           "id": "openclaw-start",
           "name": "启动",
-          "command": "wsl.exe -- bash -lic \"openclaw gateway start\"",
+          "command": "openclaw gateway start",
+          "terminal": "wsl",
           "confirm": false,
           "enabled": true
         },
         {
           "id": "openclaw-restart",
           "name": "重启",
-          "command": "wsl.exe -- bash -lic \"openclaw gateway restart\"",
+          "command": "openclaw gateway restart",
+          "terminal": "wsl",
           "confirm": true,
           "enabled": true
         }

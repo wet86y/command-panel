@@ -4,6 +4,7 @@
 
 #include <processthreadsapi.h>
 
+#include <algorithm>
 #include <array>
 
 namespace {
@@ -70,18 +71,11 @@ bool TerminalSession::CreatePseudoConsoleHost(short columns, short rows)
     return true;
 }
 
-bool TerminalSession::CreateShellProcess()
+bool TerminalSession::CreateShellProcess(const TerminalLaunchSpec& spec)
 {
-    wchar_t systemRoot[MAX_PATH]{};
-    const DWORD rootLength = GetEnvironmentVariableW(L"SystemRoot", systemRoot, MAX_PATH);
-    if (rootLength == 0 || rootLength >= MAX_PATH) {
-        SetError(L"无法确定 SystemRoot：" + Win32ErrorMessage(GetLastError()));
-        return false;
-    }
-    std::wstring shellPath(systemRoot, rootLength);
-    shellPath += L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-    if (GetFileAttributesW(shellPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        SetError(L"找不到 powershell.exe：" + shellPath);
+    if (spec.executable.empty() || GetFileAttributesW(spec.executable.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        SetError(L"找不到" + (spec.displayName.empty() ? std::wstring(L"终端程序") : spec.displayName) +
+                 L"：" + spec.executable);
         return false;
     }
 
@@ -101,7 +95,7 @@ bool TerminalSession::CreateShellProcess()
                                    hpc_, sizeof(hpc_), nullptr, nullptr)) {
         DeleteProcThreadAttributeList(attributes);
         HeapFree(GetProcessHeap(), 0, attributes);
-        SetError(L"绑定 ConPTY 到 PowerShell 失败：" + Win32ErrorMessage(GetLastError()));
+        SetError(L"绑定 ConPTY 到" + spec.displayName + L"失败：" + Win32ErrorMessage(GetLastError()));
         return false;
     }
 
@@ -109,23 +103,16 @@ bool TerminalSession::CreateShellProcess()
     startup.StartupInfo.cb = sizeof(startup);
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION processInfo{};
-    std::wstring commandLine = L"\"" + shellPath + L"\" -NoLogo -NoProfile";
-    std::wstring userProfile;
-    const DWORD profileRequired = GetEnvironmentVariableW(L"USERPROFILE", nullptr, 0);
-    if (profileRequired > 1) {
-        userProfile.resize(profileRequired);
-        const DWORD profileLength = GetEnvironmentVariableW(L"USERPROFILE", userProfile.data(), profileRequired);
-        if (profileLength > 0 && profileLength < profileRequired) userProfile.resize(profileLength);
-        else userProfile.clear();
-    }
+    std::wstring commandLine = L"\"" + spec.executable + L"\"";
+    if (!spec.arguments.empty()) commandLine += L" " + spec.arguments;
     const DWORD flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
-    const BOOL created = CreateProcessW(shellPath.c_str(), commandLine.data(), nullptr, nullptr, FALSE,
-                                        flags, nullptr, userProfile.empty() ? nullptr : userProfile.c_str(),
+    const BOOL created = CreateProcessW(spec.executable.c_str(), commandLine.data(), nullptr, nullptr, FALSE,
+                                        flags, nullptr, spec.workingDirectory.empty() ? nullptr : spec.workingDirectory.c_str(),
                                         &startup.StartupInfo, &processInfo);
     DeleteProcThreadAttributeList(attributes);
     HeapFree(GetProcessHeap(), 0, attributes);
     if (!created) {
-        SetError(L"启动 powershell.exe 失败：" + Win32ErrorMessage(GetLastError()));
+        SetError(L"启动" + spec.displayName + L"失败：" + Win32ErrorMessage(GetLastError()));
         return false;
     }
     process_ = processInfo.hProcess;
@@ -133,12 +120,13 @@ bool TerminalSession::CreateShellProcess()
     return true;
 }
 
-bool TerminalSession::Start(short columns, short rows)
+bool TerminalSession::Start(const TerminalLaunchSpec& spec, short columns, short rows)
 {
     if (running_) {
         return true;
     }
-    if (hpc_ != nullptr || process_ != nullptr || readerThread_.joinable() || writerThread_.joinable()) {
+    if (hpc_ != nullptr || process_ != nullptr || readerThread_.joinable() ||
+        writerThread_.joinable() || processWaiterThread_.joinable()) {
         Stop();
     }
     lastError_.clear();
@@ -147,22 +135,28 @@ bool TerminalSession::Start(short columns, short rows)
         std::lock_guard lock(queueMutex_);
         inputQueue_.clear();
     }
-    if (!CreatePipes() || !CreatePseudoConsoleHost(columns, rows) || !CreateShellProcess()) {
+    launchSpec_ = spec;
+    if (!CreatePipes() || !CreatePseudoConsoleHost(columns, rows) || !CreateShellProcess(spec)) {
         Stop();
         return false;
     }
 
     const uint64_t generation = ++generation_;
+    lastOutputTick_ = GetTickCount64();
     running_ = true;
     readerThread_ = std::thread(&TerminalSession::ReaderLoop, this, generation);
     writerThread_ = std::thread(&TerminalSession::WriterLoop, this);
+    processWaiterThread_ = std::thread(&TerminalSession::ProcessWaitLoop, this, generation);
     return true;
 }
 
 void TerminalSession::Stop()
 {
     const bool hadResources = running_.load() || hpc_ != nullptr || process_ != nullptr ||
-                              readerThread_.joinable() || writerThread_.joinable();
+                              readerThread_.joinable() || writerThread_.joinable() || processWaiterThread_.joinable() ||
+                              inputRead_ != nullptr || inputWrite_ != nullptr ||
+                              outputRead_ != nullptr || outputWrite_ != nullptr ||
+                              processThread_ != nullptr;
     if (!hadResources) {
         return;
     }
@@ -185,6 +179,7 @@ void TerminalSession::Stop()
 
     if (writerThread_.joinable()) writerThread_.join();
     if (readerThread_.joinable()) readerThread_.join();
+    if (processWaiterThread_.joinable()) processWaiterThread_.join();
 
     CloseHandleIf(inputRead_);
     CloseHandleIf(outputWrite_);
@@ -199,7 +194,7 @@ void TerminalSession::Stop()
 bool TerminalSession::Restart(short columns, short rows)
 {
     Stop();
-    return Start(columns, rows);
+    return Start(launchSpec_, columns, rows);
 }
 
 bool TerminalSession::SendRaw(std::string_view utf8)
@@ -253,14 +248,30 @@ void TerminalSession::ReaderLoop(uint64_t generation)
             break;
         }
         if (read == 0) break;
+        lastOutputTick_ = GetTickCount64();
         if (outputCallback_) {
             outputCallback_(generation, std::string(reinterpret_cast<char*>(buffer.data()), read));
         }
+        lastOutputTick_ = GetTickCount64();
     }
+    (void)generation;
+}
+
+void TerminalSession::ProcessWaitLoop(uint64_t generation)
+{
+    if (process_ == nullptr) return;
+    WaitForSingleObject(process_, INFINITE);
+    const ULONGLONG exitTick = GetTickCount64();
+    constexpr ULONGLONG quietPeriodMs = 100;
+    constexpr ULONGLONG maximumDrainMs = 600;
+    for (;;) {
+        const ULONGLONG now = GetTickCount64();
+        const ULONGLONG lastOutput = std::max(exitTick, lastOutputTick_.load());
+        if (now - lastOutput >= quietPeriodMs || now - exitTick >= maximumDrainMs) break;
+        Sleep(10);
+    }
+    const bool expectedStop = stopping_.exchange(true);
     running_ = false;
-    stopping_ = true;
     queueCv_.notify_all();
-    if (exitCallback_) {
-        exitCallback_(generation);
-    }
+    if (!expectedStop && exitCallback_) exitCallback_(generation);
 }

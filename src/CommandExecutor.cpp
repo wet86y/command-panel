@@ -14,7 +14,7 @@ std::wstring NewExecutionId()
 }
 }
 
-bool CommandExecutor::ExecuteManaged(const std::wstring& command)
+bool CommandExecutor::ExecuteManaged(const std::wstring& command, bool elevateWsl)
 {
     if (busy_ || command.empty() || !session_.IsRunning()) return false;
     const std::string utf8 = WideToUtf8(command);
@@ -22,13 +22,25 @@ bool CommandExecutor::ExecuteManaged(const std::wstring& command)
     if (encoded.empty() && !utf8.empty()) return false;
     currentExecutionId_ = ConfigManager::NewId();
     const std::wstring id = Utf8ToWide(currentExecutionId_);
-    std::wstring wrapper =
-        L"$__cp_command = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + Utf8ToWide(encoded) + L"')); "
-        L"$__cp_exit = 0; try { Invoke-Expression $__cp_command; "
-        L"$__cp_ok = $?; if ($null -ne $LASTEXITCODE) { $__cp_exit = [int]$LASTEXITCODE } "
-        L"elseif (-not $__cp_ok) { $__cp_exit = 1 } } catch { Write-Error $_; $__cp_exit = 1 }; "
-        L"Write-Output ('__COMMAND_PANEL_DONE__:' + '" + id + L"' + ':' + $__cp_exit); "
-        L"Remove-Variable __cp_command, __cp_ok, __cp_exit -ErrorAction SilentlyContinue\r\n";
+    std::wstring wrapper;
+    if (kind_ == TerminalKind::PowerShell) {
+        wrapper =
+            L"$__cp_command = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + Utf8ToWide(encoded) + L"')); "
+            L"$__cp_exit = 0; try { Invoke-Expression $__cp_command; "
+            L"$__cp_ok = $?; if ($null -ne $LASTEXITCODE) { $__cp_exit = [int]$LASTEXITCODE } "
+            L"elseif (-not $__cp_ok) { $__cp_exit = 1 } } catch { Write-Error $_; $__cp_exit = 1 }; "
+            L"Write-Output ('__COMMAND_PANEL_DONE__:' + '" + id + L"' + ':' + $__cp_exit); "
+            L"Remove-Variable __cp_command, __cp_ok, __cp_exit -ErrorAction SilentlyContinue\r\n";
+    } else {
+        const std::wstring invocation = elevateWsl
+            ? L"sudo bash -lc \"$__cp_command\""
+            : L"eval \"$__cp_command\"";
+        wrapper =
+            L"__cp_command=\"$(printf '%s' '" + Utf8ToWide(encoded) +
+            L"' | base64 -d)\"; " + invocation + L"; __cp_exit=$?; "
+            L"printf '\\n__COMMAND_PANEL_DONE__:" + id + L":%d\\n' \"$__cp_exit\"; "
+            L"unset __cp_command __cp_exit\n";
+    }
     const std::string wire = WideToUtf8(wrapper);
     if (!session_.SendRaw(wire)) {
         currentExecutionId_.clear();

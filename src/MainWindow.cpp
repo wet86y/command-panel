@@ -2,13 +2,15 @@
 
 #include "CommandDialog.h"
 #include "CommandMenu.h"
+#include "UiScroll.h"
 #include "UiTheme.h"
 #include "Utf.h"
 
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <gdiplus.h>
-#include <richedit.h>
+#include <shellapi.h>
+#include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -16,7 +18,6 @@
 #include <iterator>
 
 namespace {
-constexpr int IdOutput = 2001;
 constexpr int IdInput = 2002;
 constexpr int IdRuntimeState = 2003;
 constexpr int IdTitle = 2004;
@@ -31,9 +32,48 @@ constexpr int IdExecute = 2013;
 constexpr int IdMinimize = 2014;
 constexpr int IdMaximize = 2015;
 constexpr int IdClose = 2016;
+constexpr int IdOutputScroll = 2017;
+constexpr int IdInputScroll = 2018;
+constexpr int IdOutputHost = 2019;
+constexpr int IdInputHost = 2020;
+constexpr int IdTerminalPowerShell = 2021;
+constexpr int IdTerminalWsl = 2022;
 constexpr int IdAppIcon = 101;
 constexpr UINT MsgBeginWindowResize = WM_APP + 30;
 LPCWSTR ResizeCursor(int hit);
+
+LRESULT CALLBACK ScrollHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+    const bool inputHost = GetWindowLongPtrW(hwnd, GWLP_USERDATA) != 0;
+    switch (message) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(hwnd, &paint);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        HBRUSH brush = CreateSolidBrush(inputHost ? Ui::Window : RGB(10, 16, 21));
+        FillRect(dc, &client, brush);
+        DeleteObject(brush);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, RGB(30, 36, 44));
+        SetBkColor(dc, Ui::Window);
+        return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+    }
+    case WM_COMMAND:
+        return SendMessageW(GetParent(hwnd), message, wParam, lParam);
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
 
 LRESULT CALLBACK ResizeEdgeProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -96,7 +136,7 @@ LPCWSTR ResizeCursor(int hit)
     return nullptr;
 }
 
-void DrawActionButton(const DRAWITEMSTRUCT& item, bool primary)
+void DrawActionButtonContent(const DRAWITEMSTRUCT& item, bool primary)
 {
     const bool selected = (item.itemState & ODS_SELECTED) != 0;
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
@@ -154,44 +194,98 @@ void DrawActionButton(const DRAWITEMSTRUCT& item, bool primary)
     wchar_t text[256]{};
     GetWindowTextW(item.hwndItem, text, 256);
     RECT textRect = item.rcItem;
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0));
+    if (font == nullptr) font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ previousFont = SelectObject(item.hDC, font);
     SetBkMode(item.hDC, TRANSPARENT);
     SetTextColor(item.hDC, disabled ? RGB(150, 157, 168) : (primary ? RGB(255, 255, 255) : Ui::Text));
     DrawTextW(item.hDC, text, -1, &textRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    SelectObject(item.hDC, previousFont);
 }
 
-std::wstring NormalizeRichEditText(std::wstring_view text)
+void DrawActionButton(const DRAWITEMSTRUCT& item, bool primary)
 {
-    std::wstring normalized;
-    normalized.reserve(text.size() + 8);
-    for (size_t i = 0; i < text.size(); ++i) {
-        const wchar_t ch = text[i];
-        if (ch == L'\r') {
-            normalized += L'\r';
-            if (i + 1 >= text.size() || text[i + 1] != L'\n') normalized += L'\n';
-        } else if (ch == L'\n') {
-            if (i == 0 || text[i - 1] != L'\r') normalized += L'\r';
-            normalized += L'\n';
-        } else {
-            normalized += ch;
-        }
+    HDC dc = nullptr;
+    HPAINTBUFFER buffer = BeginBufferedPaint(item.hDC, &item.rcItem, BPBF_COMPATIBLEBITMAP, nullptr, &dc);
+    if (buffer == nullptr) {
+        DrawActionButtonContent(item, primary);
+        return;
     }
-    return normalized;
-}
+    DRAWITEMSTRUCT bufferedItem = item;
+    bufferedItem.hDC = dc;
+    DrawActionButtonContent(bufferedItem, primary);
+    EndBufferedPaint(buffer, TRUE);
 }
 
-MainWindow::MainWindow() : executor_(session_)
+void DrawStatusIndicator(HDC dc, float left, float top, float diameter, COLORREF color)
 {
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    Gdiplus::SolidBrush brush(
+        Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
+    graphics.FillEllipse(&brush, left, top, diameter, diameter);
+}
+
+void DrawTerminalButton(const DRAWITEMSTRUCT& item, bool active, bool ready, bool busy)
+{
+    HDC dc = nullptr;
+    HPAINTBUFFER buffer = BeginBufferedPaint(item.hDC, &item.rcItem, BPBF_COMPATIBLEBITMAP, nullptr, &dc);
+    if (buffer == nullptr) dc = item.hDC;
+    HBRUSH background = CreateSolidBrush(Ui::Window);
+    FillRect(dc, &item.rcItem, background);
+    DeleteObject(background);
+    const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    const bool hot = Ui::IsControlHot(item.hwndItem);
+    const COLORREF fill = active ? Ui::Primary : (pressed ? RGB(232,238,246) : (hot ? Ui::SurfaceHover : Ui::Window));
+    const COLORREF border = active ? Ui::Primary : Ui::Border;
+    const UINT dpi = GetDpiForWindow(item.hwndItem);
+    Ui::DrawRoundedRect(dc, item.rcItem, fill, border, Ui::Scale(7, dpi));
+    wchar_t text[64]{};
+    GetWindowTextW(item.hwndItem, text, 64);
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0));
+    HGDIOBJ oldFont = font != nullptr ? SelectObject(dc, font) : nullptr;
+    SIZE textSize{};
+    GetTextExtentPoint32W(dc, text, static_cast<int>(wcslen(text)), &textSize);
+    const int diameter = Ui::Scale(12, dpi);
+    const int gap = Ui::Scale(8, dpi);
+    const int groupWidth = diameter + gap + textSize.cx;
+    const int buttonWidth = static_cast<int>(item.rcItem.right - item.rcItem.left);
+    const int groupLeft = static_cast<int>(item.rcItem.left) +
+        std::max(0, (buttonWidth - groupWidth) / 2);
+    RECT textRect{groupLeft + diameter + gap, item.rcItem.top,
+                  item.rcItem.right, item.rcItem.bottom};
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, active ? RGB(255,255,255) : Ui::Text);
+    DrawTextW(dc, text, -1, &textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    const int top = (item.rcItem.top + item.rcItem.bottom - diameter) / 2;
+    DrawStatusIndicator(dc, static_cast<float>(groupLeft), static_cast<float>(top),
+                        static_cast<float>(diameter),
+                        !ready ? Ui::Danger : (busy ? RGB(224,157,38) : Ui::Success));
+    if (oldFont != nullptr) SelectObject(dc, oldFont);
+    if (buffer != nullptr) EndBufferedPaint(buffer, TRUE);
+}
+
+}
+
+MainWindow::MainWindow(bool elevated, std::optional<TerminalKind> startupTerminal, std::wstring startupCommand)
+    : elevated_(elevated), startupCommand_(std::move(startupCommand)), startupTerminal_(startupTerminal)
+{
+    terminals_[0] = std::make_unique<TerminalContext>(TerminalKind::PowerShell);
+    terminals_[1] = std::make_unique<TerminalContext>(TerminalKind::Wsl);
     Gdiplus::GdiplusStartupInput startupInput;
     Gdiplus::GdiplusStartup(&gdiplusToken_, &startupInput, nullptr);
-    session_.SetCallbacks(
-        [this](uint64_t generation, std::string bytes) { OnTerminalBytes(generation, std::move(bytes)); },
-        [this](uint64_t generation) { OnTerminalExit(generation); });
+    for (TerminalKind kind : {TerminalKind::PowerShell, TerminalKind::Wsl}) {
+        Context(kind).session.SetCallbacks(
+            [this, kind](uint64_t generation, std::string bytes) { OnTerminalBytes(kind, generation, std::move(bytes)); },
+            [this, kind](uint64_t generation) { OnTerminalExit(kind, generation); });
+    }
 }
 
 MainWindow::~MainWindow()
 {
     shuttingDown_ = true;
-    session_.Stop();
+    for (auto& terminal : terminals_) terminal->session.Stop();
     if (outputFont_ != nullptr) DeleteObject(outputFont_);
     if (headerFont_ != nullptr) DeleteObject(headerFont_);
     if (sectionFont_ != nullptr) DeleteObject(sectionFont_);
@@ -211,7 +305,7 @@ bool MainWindow::Create(HINSTANCE instance)
         wc.lpfnWndProc = WndProc;
         wc.hInstance = instance_;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = className;
         wc.hIcon = appIcon_ != nullptr ? appIcon_ : LoadIconW(nullptr, IDI_APPLICATION);
         wc.hIconSm = wc.hIcon;
@@ -271,31 +365,67 @@ bool MainWindow::Initialize()
     buttonPanel_.Create(hwnd_);
     buttonPanel_.SetCallbacks([this](int index) { OnButton(index); },
                               [this](int index, POINT point) { OnContext(index, point); });
-    terminalTitle_ = CreateWindowExW(0, L"STATIC", L"PowerShell", WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                     20, 0, 220, 32, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdTerminalTitle)), instance_, nullptr);
-    clear_ = CreateWindowExW(0, L"BUTTON", L"清空", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    terminalPowerShell_ = CreateWindowExW(0, L"BUTTON", L"PowerShell", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                          20, 0, 130, 32, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdTerminalPowerShell)), instance_, nullptr);
+    terminalWsl_ = CreateWindowExW(0, L"BUTTON", L"WSL", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                   150, 0, 90, 32, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdTerminalWsl)), instance_, nullptr);
+    clear_ = CreateWindowExW(0, L"BUTTON", L"清空", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                              0, 0, 80, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdClear)), instance_, nullptr);
-    ctrlC_ = CreateWindowExW(0, L"BUTTON", L"退出", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    ctrlC_ = CreateWindowExW(0, L"BUTTON", L"退出", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                              0, 0, 80, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdExit)), instance_, nullptr);
-    reset_ = CreateWindowExW(0, L"BUTTON", L"重置", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                             0, 0, 80, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdReset)), instance_, nullptr);
+    reset_ = CreateWindowExW(0, L"BUTTON", L"重置", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                              0, 0, 80, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdReset)), instance_, nullptr);
 
-    output_ = CreateWindowExW(0, MSFTEDIT_CLASS, nullptr,
-                              WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
-                              0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOutput)), instance_, nullptr);
+    static bool scrollHostClassRegistered = false;
+    constexpr wchar_t scrollHostClassName[] = L"CommandPanelScrollHost";
+    if (!scrollHostClassRegistered) {
+        WNDCLASSW scrollHostClass{};
+        scrollHostClass.lpfnWndProc = ScrollHostProc;
+        scrollHostClass.hInstance = instance_;
+        scrollHostClass.lpszClassName = scrollHostClassName;
+        scrollHostClassRegistered = RegisterClassW(&scrollHostClass) != 0 ||
+                                    GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+    if (!scrollHostClassRegistered) return false;
+    outputHost_ = CreateWindowExW(0, scrollHostClassName, nullptr,
+                                  WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                                  0, 0, 0, 0, hwnd_,
+                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOutputHost)),
+                                  instance_, nullptr);
+    if (!terminalView_.Create(outputHost_, instance_)) return false;
+    static bool outputScrollClassRegistered = false;
+    constexpr wchar_t outputScrollClassName[] = L"CommandPanelOutputScroll";
+    if (!outputScrollClassRegistered) {
+        WNDCLASSW outputScrollClass{};
+        outputScrollClass.lpfnWndProc = ScrollIndicatorProc;
+        outputScrollClass.hInstance = instance_;
+        outputScrollClass.lpszClassName = outputScrollClassName;
+        outputScrollClassRegistered = RegisterClassW(&outputScrollClass) != 0 ||
+                                     GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
     inputPrefix_ = CreateWindowExW(0, L"STATIC", L"PS  >", WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
                                    0, 0, 84, 40, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdInputPrefix)), instance_, nullptr);
+    inputHost_ = CreateWindowExW(0, scrollHostClassName, nullptr,
+                                 WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                                 0, 0, 0, 0, hwnd_,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdInputHost)),
+                                 instance_, reinterpret_cast<void*>(1));
     input_ = CreateWindowExW(0, L"EDIT", nullptr,
                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_WANTRETURN |
-                                 ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-                             0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdInput)), instance_, nullptr);
-    execute_ = CreateWindowExW(0, L"BUTTON", L"执行", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+                             0, 0, 0, 0, inputHost_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdInput)), instance_, nullptr);
+    if (outputScrollClassRegistered) {
+        inputScroll_ = CreateWindowExW(0, outputScrollClassName, nullptr,
+                                        WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, inputHost_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdInputScroll)), instance_, this);
+    }
+    execute_ = CreateWindowExW(0, L"BUTTON", L"执行", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                 0, 0, 110, 40, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdExecute)), instance_, nullptr);
     if (!title_ || !adminMode_ || !connection_ || !tabBar_.Hwnd() || !buttonPanel_.Hwnd() ||
-        !runtimeState_ || !output_ || !input_ || !execute_) return false;
+        !runtimeState_ || !terminalPowerShell_ || !terminalWsl_ || !outputHost_ ||
+        !terminalView_.Hwnd() || !inputHost_ || !input_ || !execute_) return false;
 
     SetWindowTextW(title_, L"快捷控制台");
-    SetWindowTextW(adminMode_, L"管理员模式");
+    SetWindowTextW(adminMode_, elevated_ ? L"管理员权限" : L"普通权限");
     SetWindowTextW(connection_, L"PowerShell 已连接");
     SetWindowTextW(runtimeState_, L"终端空闲");
     SetWindowTextW(clear_, L"清空");
@@ -329,19 +459,16 @@ bool MainWindow::Initialize()
                                               instance_, reinterpret_cast<void*>(static_cast<INT_PTR>(resizeHits[index])));
         if (resizeEdges_[index] == nullptr) return false;
     }
-    for (HWND button : {clear_, ctrlC_, reset_, execute_, minimize_, maximize_, close_}) {
+    for (HWND button : {terminalPowerShell_, terminalWsl_, clear_, ctrlC_, reset_, execute_, minimize_, maximize_, close_}) {
         SetWindowLongPtrW(button, GWL_STYLE, GetWindowLongPtrW(button, GWL_STYLE) | BS_OWNERDRAW);
         Ui::TrackOwnerDrawButton(button);
     }
     RecreateFonts();
-    SendMessageW(output_, EM_SETBKGNDCOLOR, 0, RGB(10, 16, 21));
-    CHARFORMAT2W format{sizeof(format)};
-    format.dwMask = CFM_COLOR;
-    format.crTextColor = RGB(226, 232, 240);
-    SendMessageW(output_, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&format));
-    SendMessageW(output_, EM_SETLIMITTEXT, 4 * 1024 * 1024, 0);
+    terminalView_.SetInputCallback([this](std::string input) {
+        CurrentTerminal().session.SendRaw(input);
+    });
     SendMessageW(input_, EM_SETCUEBANNER, TRUE,
-                 reinterpret_cast<LPARAM>(L"输入 PowerShell / WSL 命令，按 Enter 执行"));
+                 reinterpret_cast<LPARAM>(L"输入当前终端命令，按 Ctrl+Enter 执行"));
 
     inputOriginalProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(input_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(InputProc)));
     SetWindowLongPtrW(input_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
@@ -352,12 +479,22 @@ bool MainWindow::Initialize()
         buttonSectionHeight_ = MulDiv(config_.Ui().buttonSectionHeight, static_cast<int>(layoutDpi), 96);
     if (config_.Ui().inputSectionHeight > 0)
         inputSectionHeight_ = MulDiv(config_.Ui().inputSectionHeight, static_cast<int>(layoutDpi), 96);
+    activeTerminal_ = startupTerminal_.value_or(config_.Ui().activeTerminal);
+    terminalView_.SetModel(&CurrentTerminal().model);
     RefreshTabs();
     RefreshButtons();
     Layout();
-    if (!StartTerminal()) {
-        AddDiagnostic(L"[快捷控制台] " + session_.LastError() + L"\r\n");
-        SetStatus(L"● 终端启动失败");
+    for (TerminalKind kind : {TerminalKind::PowerShell, TerminalKind::Wsl}) {
+        if (!StartTerminal(kind))
+            AppendOutput(kind, L"[快捷控制台] " + Context(kind).session.LastError() + L"\r\n");
+    }
+    SwitchTerminal(activeTerminal_, false);
+    const TerminalKind startupKind = startupTerminal_.value_or(TerminalKind::PowerShell);
+    if (!startupCommand_.empty() && ExecuteManagedCommand(startupKind, startupCommand_)) {
+        AppendOutput(startupKind, std::wstring(L"\r\n") +
+                     (startupKind == TerminalKind::Wsl ? L"WSL> " : L"PS> ") + startupCommand_ + L"\r\n");
+        SwitchTerminal(startupKind, false);
+        UpdateBusyState();
     }
     wchar_t systemRoot[MAX_PATH]{};
     const DWORD rootLength = GetEnvironmentVariableW(L"SystemRoot", systemRoot, MAX_PATH);
@@ -370,35 +507,47 @@ bool MainWindow::Initialize()
     return true;
 }
 
-bool MainWindow::StartTerminal()
+bool MainWindow::StartTerminal(TerminalKind kind)
 {
-    parser_.Reset();
-    executor_.Reset();
+    auto& terminal = Context(kind);
+    terminal.parser.Reset();
+    terminal.executor.Reset();
+    terminal.permissionProbe.clear();
+    terminal.windowsElevationRequired = false;
     CalculateTerminalGrid(terminalColumns_, terminalRows_);
-    if (!session_.Start(terminalColumns_, terminalRows_)) {
-        SetWindowTextW(connection_, L"PowerShell 未连接");
-        terminalReady_ = false;
+    wchar_t systemRoot[MAX_PATH]{};
+    const DWORD rootLength = GetEnvironmentVariableW(L"SystemRoot", systemRoot, MAX_PATH);
+    if (rootLength == 0 || rootLength >= MAX_PATH) return false;
+    std::wstring root(systemRoot, rootLength);
+    TerminalLaunchSpec spec;
+    if (kind == TerminalKind::PowerShell) {
+        spec.executable = root + L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        spec.arguments = L"-NoLogo -NoProfile";
+        wchar_t profile[MAX_PATH]{};
+        const DWORD profileLength = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+        if (profileLength > 0 && profileLength < MAX_PATH) spec.workingDirectory.assign(profile, profileLength);
+        spec.displayName = L"PowerShell";
+    } else {
+        spec.executable = root + L"\\System32\\wsl.exe";
+        spec.arguments = L"--cd ~ --exec bash -l";
+        spec.displayName = L"WSL";
+    }
+    if (!terminal.session.Start(spec, terminalColumns_, terminalRows_)) {
+        terminal.ready = false;
+        RequestElevationIfNeeded(kind, terminal.session.LastError());
+        if (kind == activeTerminal_) SwitchTerminal(kind, false);
         return false;
     }
-    currentGeneration_ = session_.Generation();
-    terminalReady_ = true;
-    restartAttempts_ = 0;
-    SetWindowTextW(connection_, L"PowerShell 已连接");
+    terminal.generation = terminal.session.Generation();
+    terminal.ready = true;
+    if (kind == activeTerminal_) SwitchTerminal(kind, false);
     UpdateBusyState();
     return true;
 }
 
 void MainWindow::CalculateTerminalGrid(short& columns, short& rows) const
 {
-    RECT client{};
-    GetClientRect(output_, &client);
-    const UINT dpi = GetDpiForWindow(hwnd_);
-    const int columnCount = std::max(40, static_cast<int>(client.right) /
-                                           std::max(5, Ui::Scale(8, dpi)));
-    const int rowCount = std::max(4, static_cast<int>(client.bottom) /
-                                       std::max(10, Ui::Scale(16, dpi)));
-    columns = static_cast<short>(std::min(columnCount, 300));
-    rows = static_cast<short>(std::min(rowCount, 200));
+    terminalView_.CalculateGrid(columns, rows);
 }
 
 void MainWindow::RecreateFonts()
@@ -412,13 +561,19 @@ void MainWindow::RecreateFonts()
     sectionFont_ = Ui::CreateFont(fontDpi_, 11, FW_SEMIBOLD);
     bodyFont_ = Ui::CreateFont(fontDpi_, 10);
     SetFont(title_, headerFont_); SetFont(adminMode_, bodyFont_); SetFont(connection_, bodyFont_);
-    SetFont(runtimeState_, bodyFont_); SetFont(terminalTitle_, sectionFont_); SetFont(output_, outputFont_);
+    SetFont(runtimeState_, bodyFont_); SetFont(terminalPowerShell_, bodyFont_); SetFont(terminalWsl_, bodyFont_);
+    terminalView_.SetFont(outputFont_);
     SetFont(input_, bodyFont_); SetFont(inputPrefix_, sectionFont_); SetFont(execute_, bodyFont_);
     SetFont(clear_, bodyFont_); SetFont(ctrlC_, bodyFont_); SetFont(reset_, bodyFont_);
 }
 
 void MainWindow::Layout()
 {
+    const RECT previousButtonCard = buttonCardRect_;
+    const RECT previousTerminalCard = terminalCardRect_;
+    const RECT previousInputGroup = inputGroupRect_;
+    const RECT previousUpperSplitter = upperSplitterRect_;
+    const RECT previousLowerSplitter = lowerSplitterRect_;
     RECT client{};
     GetClientRect(hwnd_, &client);
     const int width = static_cast<int>(client.right);
@@ -452,9 +607,24 @@ void MainWindow::Layout()
     const int terminalCardBottom = lowerSplitterRect_.top - s(10);
     const int terminalHeaderHeight = s(48);
     const int captionWidth = s(48);
-    const BOOL repaintChildren = activeSplitter_ == 0 ? TRUE : FALSE;
-    const auto moveChild = [repaintChildren](HWND child, int x, int y, int childWidth, int childHeight) {
-        MoveWindow(child, x, y, childWidth, childHeight, repaintChildren);
+    HDWP positions = BeginDeferWindowPos(18);
+    const bool liveSplitterDrag = activeSplitter_ != 0;
+    const auto moveChild = [this, &positions, liveSplitterDrag](
+                               HWND child, int x, int y, int childWidth, int childHeight) {
+        RECT current{};
+        GetWindowRect(child, &current);
+        MapWindowPoints(HWND_DESKTOP, hwnd_, reinterpret_cast<POINT*>(&current), 2);
+        if (current.left == x && current.top == y && current.right - current.left == childWidth &&
+            current.bottom - current.top == childHeight) {
+            return;
+        }
+        const UINT flags = SWP_NOACTIVATE | SWP_NOZORDER |
+                           (liveSplitterDrag ? SWP_NOREDRAW : 0);
+        if (positions != nullptr) {
+            positions = DeferWindowPos(positions, child, nullptr, x, y, childWidth, childHeight, flags);
+        } else {
+            SetWindowPos(child, nullptr, x, y, childWidth, childHeight, flags);
+        }
     };
 
     moveChild(title_, s(56), 0, s(160), headerHeight);
@@ -472,7 +642,12 @@ void MainWindow::Layout()
               std::max(1, static_cast<int>(buttonCardRect_.right - buttonCardRect_.left) - s(12)),
               std::max(1, static_cast<int>(buttonCardRect_.bottom - buttonCardRect_.top) - s(12)));
 
-    moveChild(terminalTitle_, s(36), terminalCardTop + s(9), s(220), s(30));
+    const int terminalSelectorLeft = s(36);
+    const int terminalSelectorWidth = s(105);
+    const int terminalSelectorGap = s(4);
+    moveChild(terminalPowerShell_, terminalSelectorLeft, terminalCardTop + s(8), terminalSelectorWidth, s(32));
+    moveChild(terminalWsl_, terminalSelectorLeft + terminalSelectorWidth + terminalSelectorGap,
+              terminalCardTop + s(8), terminalSelectorWidth, s(32));
     const int toolHeight = s(34);
     const int toolTop = terminalCardTop + (terminalHeaderHeight - toolHeight) / 2;
     const int toolGap = s(10);
@@ -484,10 +659,14 @@ void MainWindow::Layout()
     moveChild(clear_, toolRight - resetWidth - toolGap - clearWidth, toolTop, clearWidth, toolHeight);
     moveChild(ctrlC_, toolRight - resetWidth - toolGap - clearWidth - toolGap - stopWidth,
               toolTop, stopWidth, toolHeight);
-    const int outputWidth = std::max(0, width - s(40));
-    const int outputHeight = std::max(1, terminalCardBottom - terminalCardTop - terminalHeaderHeight);
-    moveChild(output_, s(20), terminalCardTop + terminalHeaderHeight, outputWidth, outputHeight);
-    Ui::ApplyRoundedRegion(output_, outputWidth, outputHeight, s(10));
+    const int terminalBodyInset = s(6);
+    const int outputWidth = std::max(1, width - s(40) - terminalBodyInset * 2);
+    const int outputHeight = std::max(
+        1, terminalCardBottom - terminalCardTop - terminalHeaderHeight - terminalBodyInset * 2);
+    moveChild(outputHost_, s(20) + terminalBodyInset,
+              terminalCardTop + terminalHeaderHeight + terminalBodyInset,
+              outputWidth, outputHeight);
+    Ui::ApplyRoundedRegion(outputHost_, outputWidth, outputHeight, s(8));
     terminalCardRect_ = RECT{s(20), terminalCardTop, width - s(20), terminalCardBottom};
 
     const int inputTop = lowerSplitterRect_.bottom;
@@ -498,14 +677,38 @@ void MainWindow::Layout()
     const int prefixWidth = c(100);
     inputGroupRect_ = RECT{s(20), inputY, executeLeft - s(10), inputY + inputControlHeight};
     moveChild(inputPrefix_, inputGroupRect_.left, inputGroupRect_.top, prefixWidth, inputControlHeight);
-    moveChild(input_, inputGroupRect_.left + prefixWidth + s(2), inputGroupRect_.top + s(3),
-              std::max(s(80), static_cast<int>(inputGroupRect_.right - inputGroupRect_.left) - prefixWidth - s(6)),
-              std::max(1, inputControlHeight - s(6)));
+    const int inputLeft = inputGroupRect_.left + prefixWidth + s(2);
+    const int inputControlWidth = std::max(
+        s(80), static_cast<int>(inputGroupRect_.right - inputGroupRect_.left) - prefixWidth - s(6));
+    const int inputEditHeight = std::max(1, inputControlHeight - s(6));
+    moveChild(inputHost_, inputLeft, inputGroupRect_.top + s(3), inputControlWidth, inputEditHeight);
     const int executeHeight = std::min(inputControlHeight, c(58));
     moveChild(execute_, executeLeft, inputY + (inputControlHeight - executeHeight) / 2,
               executeWidth, executeHeight);
+    if (positions != nullptr) EndDeferWindowPos(positions);
+    const int nativeScrollWidth = std::max(s(8), GetSystemMetricsForDpi(SM_CXVSCROLL, dpi));
+    const auto resizeHostedControl = [liveSplitterDrag](
+                                         HWND control, int controlWidth, int controlHeight) {
+        RECT current{};
+        GetWindowRect(control, &current);
+        if (current.right - current.left == controlWidth && current.bottom - current.top == controlHeight) return;
+        SetWindowPos(control, nullptr, 0, 0, controlWidth, controlHeight,
+                     SWP_NOACTIVATE | SWP_NOZORDER |
+                         (liveSplitterDrag ? SWP_NOREDRAW : 0));
+    };
+    resizeHostedControl(terminalView_.Hwnd(), outputWidth,
+                        liveSplitterDrag ? std::max(1, height) : outputHeight);
+    resizeHostedControl(input_, inputControlWidth + nativeScrollWidth,
+                        liveSplitterDrag ? std::max(1, height) : inputEditHeight);
+    const int overlayWidth = std::max(2, s(6));
+    if (inputScroll_ != nullptr) {
+        const UINT scrollFlags = SWP_NOACTIVATE | SWP_SHOWWINDOW |
+                                 (liveSplitterDrag ? SWP_NOREDRAW : 0);
+        SetWindowPos(inputScroll_, HWND_TOP, inputControlWidth - overlayWidth, s(3), overlayWidth,
+                     std::max(1, inputEditHeight - s(6)), scrollFlags);
+    }
     const int resizeEdge = std::max(7, s(10));
-    const UINT edgeFlags = SWP_NOACTIVATE | (activeSplitter_ != 0 ? SWP_NOREDRAW : 0);
+    const UINT edgeFlags = SWP_NOACTIVATE | SWP_NOREDRAW;
     const auto placeEdge = [&](size_t index, int x, int y, int edgeWidth, int edgeHeight) {
         SetWindowPos(resizeEdges_[index], HWND_TOP, x, y, std::max(1, edgeWidth),
                      std::max(1, edgeHeight), edgeFlags);
@@ -518,22 +721,38 @@ void MainWindow::Layout()
     placeEdge(5, resizeEdge, height - resizeEdge, width - resizeEdge * 2, resizeEdge);
     placeEdge(6, 0, height - resizeEdge, resizeEdge, resizeEdge);
     placeEdge(7, 0, resizeEdge, resizeEdge, height - resizeEdge * 2);
-    buttonPanel_.Layout();
+    RECT dirty{};
+    const auto addDirty = [&dirty](const RECT& first, const RECT& second) {
+        if (EqualRect(&first, &second)) return;
+        RECT pair{};
+        UnionRect(&pair, &first, &second);
+        RECT combined{};
+        UnionRect(&combined, &dirty, &pair);
+        dirty = combined;
+    };
+    addDirty(previousButtonCard, buttonCardRect_);
+    addDirty(previousTerminalCard, terminalCardRect_);
+    addDirty(previousInputGroup, inputGroupRect_);
+    addDirty(previousUpperSplitter, upperSplitterRect_);
+    addDirty(previousLowerSplitter, lowerSplitterRect_);
+    if (IsRectEmpty(&dirty)) dirty = RECT{0, contentTop, width, height};
+    InvalidateRect(hwnd_, activeSplitter_ != 0 ? &dirty : nullptr, FALSE);
     if (activeSplitter_ != 0) {
-        RECT contentRedraw{0, contentTop, width, height};
-        RedrawWindow(hwnd_, &contentRedraw, nullptr,
-                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
-    } else {
-        RedrawWindow(hwnd_, nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        RedrawWindow(hwnd_, &dirty, nullptr,
+                     RDW_INVALIDATE | RDW_NOERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
-    if (terminalReady_ && activeSplitter_ == 0) {
+    PostMessageW(hwnd_, WM_APP_REFRESH_SCROLLS, 0, 0);
+    if (activeSplitter_ == 0) {
         short columns = 0, rows = 0;
         CalculateTerminalGrid(columns, rows);
         if (columns != terminalColumns_ || rows != terminalRows_) {
             terminalColumns_ = columns;
             terminalRows_ = rows;
-            session_.Resize(columns, rows);
+            for (auto& terminal : terminals_) {
+                terminal->model.Resize(columns, rows);
+                if (terminal->ready) terminal->session.Resize(columns, rows);
+            }
+            terminalView_.OnModelChanged();
         }
     }
 }
@@ -551,12 +770,18 @@ void MainWindow::RefreshButtons()
 {
     if (config_.Tabs().empty()) {
         buttonPanel_.SetButtons({});
-        UpdateBusyState();
         return;
     }
     activeTab_ = std::clamp(activeTab_, 0, static_cast<int>(config_.Tabs().size()) - 1);
-    buttonPanel_.SetButtons(config_.Tabs()[activeTab_].buttons);
-    UpdateBusyState();
+    const auto& buttons = config_.Tabs()[activeTab_].buttons;
+    buttonPanel_.SetButtons(buttons);
+    std::vector<bool> availability;
+    availability.reserve(buttons.size());
+    for (const auto& button : buttons) {
+        const auto& terminal = Context(button.terminal);
+        availability.push_back(terminal.ready && !terminal.executor.IsBusy());
+    }
+    buttonPanel_.SetAvailability(std::move(availability));
 }
 
 void MainWindow::OnTabSelected(int index)
@@ -621,19 +846,52 @@ void MainWindow::DeleteTab(int index)
 
 void MainWindow::UpdateBusyState()
 {
-    buttonPanel_.SetBusy(executor_.IsBusy());
+    const auto& terminal = CurrentTerminal();
+    buttonPanel_.SetBusy(false);
     EnableWindow(clear_, TRUE);
-    EnableWindow(ctrlC_, terminalReady_);
+    EnableWindow(ctrlC_, terminal.ready);
     EnableWindow(reset_, TRUE);
-    EnableWindow(execute_, terminalReady_);
-    if (executor_.IsBusy()) {
+    EnableWindow(execute_, terminal.ready);
+    if (terminal.executor.IsBusy()) {
         SetStatus(L"命令执行中");
-    } else if (terminalReady_) {
+    } else if (terminal.ready) {
         SetStatus(L"终端空闲");
     } else {
         SetStatus(L"终端不可用");
     }
+    if (!config_.Tabs().empty() && activeTab_ >= 0) {
+        std::vector<bool> availability;
+        const auto& buttons = config_.Tabs()[activeTab_].buttons;
+        availability.reserve(buttons.size());
+        for (const auto& button : buttons) {
+            const auto& target = Context(button.terminal);
+            availability.push_back(target.ready && !target.executor.IsBusy());
+        }
+        buttonPanel_.SetAvailability(std::move(availability));
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::SwitchTerminal(TerminalKind kind, bool focus)
+{
+    activeTerminal_ = kind;
+    auto& terminal = CurrentTerminal();
+    terminalView_.SetModel(&terminal.model);
+    SetWindowTextW(inputPrefix_, kind == TerminalKind::Wsl ? L"WSL  ›" : L"PS  ›");
+    const std::wstring connection = std::wstring(kind == TerminalKind::Wsl ? L"WSL " : L"PowerShell ") +
+                                    (terminal.ready ? L"已连接" : L"未连接");
+    SetWindowTextW(connection_, connection.c_str());
+    InvalidateRect(terminalPowerShell_, nullptr, FALSE);
+    InvalidateRect(terminalWsl_, nullptr, FALSE);
+    UpdateBusyState();
+    if (focus && kind == TerminalKind::Wsl) {
+        terminal.elevationOnFailure = true;
+        if (terminal.windowsElevationRequired) {
+            SetStatus(L"●  WSL 需要管理员权限，正在请求提升");
+            if (LaunchElevatedTerminal(TerminalKind::Wsl)) return;
+        }
+    }
+    if (focus) SetFocus(terminalView_.Hwnd());
 }
 
 void MainWindow::SetStatus(const std::wstring& text)
@@ -648,49 +906,146 @@ void MainWindow::SetStatus(const std::wstring& text)
 
 void MainWindow::AddDiagnostic(const std::wstring& text)
 {
-    AppendOutput(text);
+    AppendOutput(activeTerminal_, text);
 }
 
-void MainWindow::AppendOutput(std::wstring_view text)
+void MainWindow::AppendOutput(TerminalKind kind, std::wstring_view text)
 {
-    if (text.empty() || output_ == nullptr) return;
-    const int length = GetWindowTextLengthW(output_);
-    SendMessageW(output_, EM_SETSEL, static_cast<WPARAM>(length), static_cast<LPARAM>(length));
-    const std::wstring value = NormalizeRichEditText(text);
-    SendMessageW(output_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(value.c_str()));
-    SendMessageW(output_, EM_SCROLLCARET, 0, 0);
-    SendMessageW(output_, EM_SCROLL, SB_BOTTOM, 0);
-    const int newLength = GetWindowTextLengthW(output_);
-    if (newLength > 4 * 1024 * 1024) {
-        SendMessageW(output_, EM_SETSEL, 0, newLength / 10);
-        SendMessageW(output_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
+    if (text.empty()) return;
+    auto& terminal = Context(kind);
+    terminal.model.Feed(text);
+    const std::string response = terminal.model.TakeResponse();
+    if (!response.empty() && terminal.ready) terminal.session.SendRaw(response);
+    if (kind == activeTerminal_) terminalView_.OnModelChanged();
+}
+
+void MainWindow::ShowInputScrollBar()
+{
+    ShowScrollIndicator(input_, inputScroll_, WM_APP_INPUT_SCROLL_HIDE_TIMER);
+}
+
+void MainWindow::HideInputScrollBar()
+{
+    HideScrollIndicator(inputScroll_, WM_APP_INPUT_SCROLL_HIDE_TIMER);
+}
+
+bool MainWindow::HandleTextWheel(HWND target, int& remainder, WPARAM wParam)
+{
+    const bool moved = UiScroll::ScrollTextControl(
+        target, GET_WHEEL_DELTA_WPARAM(wParam), UiScroll::SystemWheelScrollLines(), remainder);
+    if (target == input_) ShowInputScrollBar();
+    return moved;
+}
+
+void MainWindow::RefreshVisibleScrollIndicators()
+{
+    if (activeSplitter_ != 0) {
+        HideInputScrollBar();
+        return;
     }
+    if (inputScrollVisible_) ShowInputScrollBar();
+    else if (inputScroll_ != nullptr) InvalidateRect(inputScroll_, nullptr, FALSE);
+}
+
+void MainWindow::ShowScrollIndicator(HWND target, HWND indicator, UINT timer)
+{
+    if (target == nullptr || indicator == nullptr) return;
+    if (!UiScroll::IsScrollable(UiScroll::ReadMetrics(target))) {
+        HideScrollIndicator(indicator, timer);
+        return;
+    }
+    if (indicator == inputScroll_) inputScrollVisible_ = true;
+    InvalidateRect(indicator, nullptr, FALSE);
+    SetTimer(hwnd_, timer, 1200, nullptr);
+}
+
+void MainWindow::HideScrollIndicator(HWND indicator, UINT timer)
+{
+    KillTimer(hwnd_, timer);
+    if (indicator == inputScroll_) inputScrollVisible_ = false;
+    if (indicator != nullptr) InvalidateRect(indicator, nullptr, FALSE);
+}
+
+LRESULT CALLBACK MainWindow::ScrollIndicatorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    auto* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        self = reinterpret_cast<MainWindow*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    switch (message) {
+    case WM_NCHITTEST:
+        return HTCLIENT;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_MOUSEWHEEL:
+        if (self != nullptr) {
+            SendMessageW(self->input_, message, wParam, lParam);
+        }
+        return 0;
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC targetDc = BeginPaint(hwnd, &paint);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        HDC dc = nullptr;
+        HPAINTBUFFER buffer = BeginBufferedPaint(targetDc, &client, BPBF_COMPATIBLEBITMAP, nullptr, &dc);
+        if (buffer == nullptr) dc = targetDc;
+        HBRUSH background = CreateSolidBrush(Ui::Window);
+        FillRect(dc, &client, background);
+        DeleteObject(background);
+        const bool thumbActive = self != nullptr && self->inputScrollVisible_;
+        if (thumbActive) {
+            const HWND target = self->input_;
+            const int height = std::max(1, static_cast<int>(client.bottom - client.top));
+            const UiScroll::Thumb thumb = UiScroll::CalculateThumb(
+                UiScroll::ReadMetrics(target), height,
+                Ui::Scale(18, GetDpiForWindow(self->hwnd_)));
+            if (thumb.visible) {
+                const int width = std::max(2, Ui::Scale(4, GetDpiForWindow(self->hwnd_)));
+                const int left = std::max(0, (static_cast<int>(client.right) - width) / 2);
+                RECT thumbRect{left, thumb.top, std::min(static_cast<int>(client.right), left + width),
+                               thumb.top + thumb.height};
+                Ui::DrawRoundedRect(dc, thumbRect, RGB(100, 116, 139), RGB(100, 116, 139), width);
+            }
+        }
+        if (buffer != nullptr) EndBufferedPaint(buffer, TRUE);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
 void MainWindow::ClearOutput()
 {
-    SendMessageW(output_, EM_SETSEL, 0, -1);
-    SendMessageW(output_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
+    CurrentTerminal().model.Clear();
+    terminalView_.OnModelChanged();
     SetStatus(L"●  输出已清空");
 }
 
 void MainWindow::ExitCommand()
 {
-    if (session_.SendRaw(std::string(1, '\x03'))) SetStatus(L"●  已发送退出当前命令");
+    if (CurrentTerminal().session.SendRaw(std::string(1, '\x03'))) SetStatus(L"●  已发送退出当前命令");
 }
 
-void MainWindow::OnTerminalBytes(uint64_t generation, std::string bytes)
+void MainWindow::OnTerminalBytes(TerminalKind kind, uint64_t generation, std::string bytes)
 {
     if (hwnd_ == nullptr) return;
-    const std::wstring parsed = parser_.Feed(std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size()));
-    auto* packet = new TerminalOutputPacket{generation, parsed};
+    const std::wstring parsed = Context(kind).parser.Feed(
+        std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size()));
+    auto* packet = new TerminalOutputPacket{kind, generation, parsed};
     if (!PostMessageW(hwnd_, WM_APP_TERMINAL_OUTPUT, 0, reinterpret_cast<LPARAM>(packet))) delete packet;
 }
 
-void MainWindow::OnTerminalExit(uint64_t generation)
+void MainWindow::OnTerminalExit(TerminalKind kind, uint64_t generation)
 {
     if (hwnd_ == nullptr) return;
-    auto* packet = new TerminalExitPacket{generation};
+    auto* packet = new TerminalExitPacket{kind, generation};
     if (!PostMessageW(hwnd_, WM_APP_TERMINAL_EXITED, 0, reinterpret_cast<LPARAM>(packet))) delete packet;
 }
 
@@ -708,12 +1063,26 @@ void MainWindow::ExecuteButton(int index)
         const std::wstring message = L"确认执行？\r\n\r\n按钮：" + button.name + L"\r\n\r\n命令：\r\n" + button.command;
         if (!CommandDialog::Confirm(hwnd_, L"确认执行", message, L"执行")) return;
     }
-    if (!executor_.ExecuteManaged(button.command)) {
+    if (!ExecuteManagedCommand(button.terminal, button.command)) {
         SetStatus(L"●  命令无法发送");
         return;
     }
-    AppendOutput(L"\r\nPS> " + button.command + L"\r\n");
+    SwitchTerminal(button.terminal);
+    AppendOutput(button.terminal,
+                 std::wstring(L"\r\n") + (button.terminal == TerminalKind::Wsl ? L"WSL> " : L"PS> ") +
+                 button.command + L"\r\n");
     UpdateBusyState();
+}
+
+bool MainWindow::ExecuteManagedCommand(TerminalKind kind, const std::wstring& command, bool elevateWsl)
+{
+    auto& terminal = Context(kind);
+    if (!terminal.executor.ExecuteManaged(command, elevateWsl)) return false;
+    terminal.currentCommand = command;
+    if (!elevateWsl) terminal.elevationRequested = false;
+    terminal.linuxElevationPending = false;
+    terminal.permissionProbe.clear();
+    return true;
 }
 
 void MainWindow::ExecuteInput()
@@ -723,16 +1092,90 @@ void MainWindow::ExecuteInput()
     std::wstring command(buffer);
     if (command.empty()) return;
     SetWindowTextW(input_, L"");
-    history_.push_back(command);
-    historyPosition_ = -1;
-    if (executor_.IsBusy()) {
-        executor_.SendInteractiveInput(command);
-    } else if (executor_.ExecuteManaged(command)) {
-        AppendOutput(L"\r\nPS> " + command + L"\r\n");
+    auto& terminal = CurrentTerminal();
+    terminal.history.push_back(command);
+    terminal.historyPosition = -1;
+    if (terminal.executor.IsBusy()) {
+        terminal.executor.SendInteractiveInput(command);
+    } else if (ExecuteManagedCommand(activeTerminal_, command)) {
+        AppendOutput(activeTerminal_, std::wstring(L"\r\n") +
+                     (activeTerminal_ == TerminalKind::Wsl ? L"WSL> " : L"PS> ") + command + L"\r\n");
         UpdateBusyState();
     } else {
         SetStatus(L"●  命令无法发送");
     }
+}
+
+bool MainWindow::RequestElevationIfNeeded(TerminalKind kind, std::wstring_view output)
+{
+    auto& terminal = Context(kind);
+    if (terminal.elevationRequested) return false;
+    terminal.permissionProbe.append(output);
+    constexpr size_t probeLimit = 4096;
+    if (terminal.permissionProbe.size() > probeLimit)
+        terminal.permissionProbe.erase(0, terminal.permissionProbe.size() - probeLimit);
+    std::wstring lower(terminal.permissionProbe);
+    std::transform(lower.begin(), lower.end(), lower.begin(), towlower);
+    const bool windowsElevation = lower.find(L"requires elevation") != std::wstring::npos ||
+                                  lower.find(L"requested operation requires elevation") != std::wstring::npos ||
+                                  lower.find(L"\x8BF7\x6C42\x7684\x64CD\x4F5C\x9700\x8981\x63D0\x5347") != std::wstring::npos ||
+                                  terminal.permissionProbe.find(L"操作需要提升") != std::wstring::npos ||
+                                  terminal.permissionProbe.find(L"需要管理员权限") != std::wstring::npos;
+    const bool accessDenied = lower.find(L"access is denied") != std::wstring::npos ||
+                              lower.find(L"permission denied") != std::wstring::npos ||
+                              windowsElevation ||
+                              terminal.permissionProbe.find(L"拒绝访问") != std::wstring::npos ||
+                              terminal.permissionProbe.find(L"权限不足") != std::wstring::npos;
+    if (!accessDenied) return false;
+
+    if (kind == TerminalKind::Wsl && windowsElevation && terminal.currentCommand.empty()) {
+        terminal.windowsElevationRequired = true;
+        if (terminal.elevationOnFailure) return LaunchElevatedTerminal(TerminalKind::Wsl);
+        return false;
+    }
+    if (kind == TerminalKind::Wsl && !windowsElevation && !terminal.currentCommand.empty()) {
+        terminal.elevationRequested = true;
+        terminal.linuxElevationPending = true;
+        return false;
+    }
+    if (terminal.currentCommand.empty()) return false;
+    return LaunchElevatedTerminal(kind);
+}
+
+bool MainWindow::LaunchElevatedTerminal(TerminalKind kind)
+{
+    auto& terminal = Context(kind);
+    if (elevated_ || terminal.elevationRequested) return false;
+    terminal.elevationRequested = true;
+    wchar_t executable[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        SetStatus(L"● 无法定位程序，未能请求管理员权限");
+        return false;
+    }
+    std::wstring parameters = L"--elevated-terminal " +
+        Utf8ToWide(std::string(TerminalKindName(kind)));
+    if (!terminal.currentCommand.empty()) {
+        parameters += L" --elevated-command " +
+            Utf8ToWide(Base64Encode(WideToUtf8(terminal.currentCommand)));
+    }
+    SHELLEXECUTEINFOW request{sizeof(request)};
+    request.fMask = SEE_MASK_FLAG_NO_UI;
+    request.hwnd = hwnd_;
+    request.lpVerb = L"runas";
+    request.lpFile = executable;
+    request.lpParameters = parameters.c_str();
+    request.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&request)) {
+        terminal.elevationRequested = false;
+        SetStatus(GetLastError() == ERROR_CANCELLED ? L"● 已取消管理员权限请求" : L"● 未能请求管理员权限");
+        return false;
+    }
+    terminal.windowsElevationRequired = false;
+    terminal.elevationOnFailure = false;
+    SetStatus(L"● 已请求管理员权限，正在以管理员模式重新打开");
+    PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+    return true;
 }
 
 void MainWindow::OnContext(int index, POINT point)
@@ -826,30 +1269,35 @@ void MainWindow::PersistUiState()
     state.windowHeight = std::max(1, MulDiv(windowRect.bottom - windowRect.top, 96, static_cast<int>(dpi)));
     state.buttonSectionHeight = std::max(0, MulDiv(buttonSectionHeight_, 96, static_cast<int>(dpi)));
     state.inputSectionHeight = std::max(0, MulDiv(inputSectionHeight_, 96, static_cast<int>(dpi)));
+    state.activeTerminal = activeTerminal_;
     if (!config_.Save()) SetStatus(L"配置保存失败");
 }
 
 void MainWindow::ResetTerminal(bool ask)
 {
+    const TerminalKind kind = activeTerminal_;
+    auto& terminal = CurrentTerminal();
+    const std::wstring terminalName = kind == TerminalKind::Wsl ? L"WSL" : L"PowerShell";
     if (ask && !CommandDialog::Confirm(hwnd_, L"重置终端",
-                                       L"这会终止当前 PowerShell / ConPTY 会话，但不会退出快捷控制台。\r\n\r\n是否继续？",
+                                       L"这会终止当前 " + terminalName + L" / ConPTY 会话，但不会退出快捷控制台。\r\n\r\n是否继续？",
                                        L"重置")) return;
-    terminalReady_ = false;
-    executor_.Reset();
+    terminal.ready = false;
+    terminal.restartAttempts = 0;
+    terminal.executor.Reset();
+    terminal.session.Stop();
+    terminal.parser.Reset();
     UpdateBusyState();
     CalculateTerminalGrid(terminalColumns_, terminalRows_);
-    session_.Restart(terminalColumns_, terminalRows_);
-    if (session_.IsRunning()) {
-        parser_.Reset();
-        currentGeneration_ = session_.Generation();
-        terminalReady_ = true;
-    SetWindowTextW(connection_, L"PowerShell 已连接");
-        AddDiagnostic(L"[快捷控制台] PowerShell 会话已重新建立。\r\n");
+    terminal.session.Restart(terminalColumns_, terminalRows_);
+    if (terminal.session.IsRunning()) {
+        terminal.generation = terminal.session.Generation();
+        terminal.ready = true;
+        AppendOutput(kind, L"[快捷控制台] " + terminalName + L" 会话已重新建立。\r\n");
     } else {
-        AddDiagnostic(L"[快捷控制台] 终端重置失败：" + session_.LastError() + L"\r\n");
-        SetWindowTextW(connection_, L"PowerShell 未连接");
+        AppendOutput(kind, L"[快捷控制台] 终端重置失败：" + terminal.session.LastError() + L"\r\n");
         SetStatus(L"●  终端重置失败");
     }
+    SwitchTerminal(kind, false);
     Layout();
     UpdateBusyState();
 }
@@ -858,31 +1306,48 @@ LRESULT MainWindow::HandleInputMessage(HWND hwnd, UINT message, WPARAM wParam, L
 {
     if (message == WM_KEYDOWN) {
         if (wParam == VK_RETURN) {
-            if ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
-                return CallWindowProcW(inputOriginalProc_, hwnd, message, wParam, lParam);
-            ExecuteInput();
-            return 0;
+            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                ExecuteInput();
+                return 0;
+            }
+            const LRESULT result = CallWindowProcW(inputOriginalProc_, hwnd, message, wParam, lParam);
+            PostMessageW(hwnd_, WM_APP_INPUT_SCROLLED, 0, 0);
+            return result;
         }
         if (wParam == VK_ESCAPE) { SetWindowTextW(hwnd, L""); return 0; }
         const bool historyKey = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        if (historyKey && wParam == VK_UP && !history_.empty()) {
-            if (historyPosition_ < 0) historyPosition_ = static_cast<int>(history_.size()) - 1;
-            else historyPosition_ = std::max(0, historyPosition_ - 1);
-            SetWindowTextW(hwnd, history_[historyPosition_].c_str());
+        auto& terminal = CurrentTerminal();
+        if (historyKey && wParam == VK_UP && !terminal.history.empty()) {
+            if (terminal.historyPosition < 0) terminal.historyPosition = static_cast<int>(terminal.history.size()) - 1;
+            else terminal.historyPosition = std::max(0, terminal.historyPosition - 1);
+            SetWindowTextW(hwnd, terminal.history[terminal.historyPosition].c_str());
             SendMessageW(hwnd, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
             return 0;
         }
-        if (historyKey && wParam == VK_DOWN && historyPosition_ >= 0) {
-            ++historyPosition_;
-            if (historyPosition_ >= static_cast<int>(history_.size())) { historyPosition_ = -1; SetWindowTextW(hwnd, L""); }
-            else SetWindowTextW(hwnd, history_[historyPosition_].c_str());
+        if (historyKey && wParam == VK_DOWN && terminal.historyPosition >= 0) {
+            ++terminal.historyPosition;
+            if (terminal.historyPosition >= static_cast<int>(terminal.history.size())) { terminal.historyPosition = -1; SetWindowTextW(hwnd, L""); }
+            else SetWindowTextW(hwnd, terminal.history[terminal.historyPosition].c_str());
             SendMessageW(hwnd, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
             return 0;
         }
     }
-    if (message == WM_CHAR && wParam == L'\r' && (GetKeyState(VK_SHIFT) & 0x8000) == 0)
+    if (message == WM_MOUSEWHEEL) {
+        HandleTextWheel(input_, inputWheelRemainder_, wParam);
         return 0;
-    return CallWindowProcW(inputOriginalProc_, hwnd, message, wParam, lParam);
+    }
+    if (message == WM_VSCROLL) {
+        const LRESULT result = CallWindowProcW(inputOriginalProc_, hwnd, message, wParam, lParam);
+        PostMessageW(hwnd_, WM_APP_INPUT_SCROLLED, 0, 0);
+        return result;
+    }
+    if (message == WM_CHAR && wParam == L'\r' && (GetKeyState(VK_CONTROL) & 0x8000) != 0)
+        return 0;
+    const LRESULT result = CallWindowProcW(inputOriginalProc_, hwnd, message, wParam, lParam);
+    if (message == WM_KEYDOWN &&
+        (wParam == VK_PRIOR || wParam == VK_NEXT || wParam == VK_HOME || wParam == VK_END))
+        PostMessageW(hwnd_, WM_APP_INPUT_SCROLLED, 0, 0);
+    return result;
 }
 
 LRESULT CALLBACK MainWindow::InputProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -954,8 +1419,6 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             activeSplitter_ = PtInRect(&upperSplitterRect_, point) ? 1 : 2;
             splitterDragOriginY_ = point.y;
             splitterDragOriginSize_ = activeSplitter_ == 1 ? buttonSectionHeight_ : inputSectionHeight_;
-            buttonPanel_.SetResizeSuspended(true);
-            SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, GetWindowLongPtrW(hwnd_, GWL_EXSTYLE) | WS_EX_COMPOSITED);
             SetCapture(hwnd_);
             SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1037,11 +1500,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         }
         if (activeSplitter_ != 0) {
             activeSplitter_ = 0;
-            buttonPanel_.SetResizeSuspended(false);
             ReleaseCapture();
             Layout();
-            SetWindowLongPtrW(hwnd_, GWL_EXSTYLE,
-                              GetWindowLongPtrW(hwnd_, GWL_EXSTYLE) & ~static_cast<LONG_PTR>(WS_EX_COMPOSITED));
             PersistUiState();
             return 0;
         }
@@ -1050,18 +1510,18 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         resizeHitTest_ = HTNOWHERE;
         if (activeSplitter_ != 0) {
             activeSplitter_ = 0;
-            buttonPanel_.SetResizeSuspended(false);
-            SetWindowLongPtrW(hwnd_, GWL_EXSTYLE,
-                              GetWindowLongPtrW(hwnd_, GWL_EXSTYLE) & ~static_cast<LONG_PTR>(WS_EX_COMPOSITED));
             Layout();
             PersistUiState();
         }
         break;
     case WM_PAINT: {
         PAINTSTRUCT paint{};
-        HDC dc = BeginPaint(hwnd_, &paint);
+        HDC targetDc = BeginPaint(hwnd_, &paint);
         RECT client{};
         GetClientRect(hwnd_, &client);
+        HDC dc = nullptr;
+        HPAINTBUFFER buffer = BeginBufferedPaint(targetDc, &client, BPBF_COMPATIBLEBITMAP, nullptr, &dc);
+        if (buffer == nullptr) dc = targetDc;
         const UINT dpi = GetDpiForWindow(hwnd_);
         const auto s = [dpi](int value) { return Ui::Scale(value, dpi); };
         const int headerHeight = s(60);
@@ -1078,8 +1538,11 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         SelectObject(dc, oldPen);
         DeleteObject(line);
 
-        if (appIcon_ != nullptr)
-            DrawIconEx(dc, s(18), s(14), appIcon_, s(32), s(32), 0, nullptr, DI_NORMAL);
+        if (appIcon_ != nullptr) {
+            HBRUSH headerBrush = CreateSolidBrush(Ui::Window);
+            DrawIconEx(dc, s(18), s(14), appIcon_, s(32), s(32), 0, headerBrush, DI_NORMAL);
+            DeleteObject(headerBrush);
+        }
 
         Ui::DrawRoundedRect(dc, buttonCardRect_, Ui::Window, Ui::Border, s(12));
 
@@ -1112,28 +1575,22 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         drawSplitter(lowerSplitterRect_, activeSplitter_ == 2 || hotSplitter_ == 2);
 
         auto drawStatusDot = [&](int x, COLORREF color) {
-            Gdiplus::Graphics graphics(dc);
-            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
             const float scale = 0.75F * static_cast<float>(dpi) / 96.0F;
             const float diameter = 12.0F * scale;
             const float left = static_cast<float>(x) * scale;
             const float top = (static_cast<float>(headerHeight) - diameter) / 2.0F;
-            Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
-            graphics.FillEllipse(&brush, left, top, diameter, diameter);
+            DrawStatusIndicator(dc, left, top, diameter, color);
         };
         drawStatusDot(260, Ui::Primary);
-        drawStatusDot(384, terminalReady_ ? Ui::Success : Ui::Danger);
-        drawStatusDot(544, terminalReady_ ? (executor_.IsBusy() ? RGB(224, 157, 38) : Ui::Success) : Ui::Danger);
+        const auto& terminal = CurrentTerminal();
+        drawStatusDot(384, terminal.ready ? Ui::Success : Ui::Danger);
+        drawStatusDot(544, terminal.ready ? (terminal.executor.IsBusy() ? RGB(224, 157, 38) : Ui::Success) : Ui::Danger);
+        if (buffer != nullptr) EndBufferedPaint(buffer, TRUE);
         EndPaint(hwnd_, &paint);
         return 0;
     }
-    case WM_ERASEBKGND: {
-        RECT client{};
-        GetClientRect(hwnd_, &client);
-        FillRect(reinterpret_cast<HDC>(wParam), &client, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+    case WM_ERASEBKGND:
         return 1;
-    }
     case WM_SIZE:
         Layout();
         InvalidateRect(maximize_, nullptr, FALSE);
@@ -1152,11 +1609,11 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         HDC dc = reinterpret_cast<HDC>(wParam);
         HWND control = reinterpret_cast<HWND>(lParam);
         SetBkMode(dc, TRANSPARENT);
-        if (control == connection_) SetTextColor(dc, terminalReady_ ? Ui::Success : Ui::Danger);
+        if (control == connection_) SetTextColor(dc, CurrentTerminal().ready ? Ui::Success : Ui::Danger);
         else if (control == adminMode_) SetTextColor(dc, RGB(35, 96, 180));
         else if (control == runtimeState_) SetTextColor(dc, Ui::TextMuted);
         else SetTextColor(dc, Ui::Text);
-        if (control == terminalTitle_) {
+        if (control == inputPrefix_) {
             SetBkMode(dc, OPAQUE); SetBkColor(dc, Ui::Window);
             return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
         }
@@ -1171,6 +1628,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_DRAWITEM: {
         auto* item = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
         if (item != nullptr && item->CtlType == ODT_BUTTON) {
+            if (item->CtlID == IdTerminalPowerShell || item->CtlID == IdTerminalWsl) {
+                const TerminalKind kind = item->CtlID == IdTerminalWsl ? TerminalKind::Wsl : TerminalKind::PowerShell;
+                const auto& terminal = Context(kind);
+                DrawTerminalButton(*item, kind == activeTerminal_, terminal.ready, terminal.executor.IsBusy());
+                return TRUE;
+            }
             DrawActionButton(*item, item->CtlID == IdExecute);
             return TRUE;
         }
@@ -1178,6 +1641,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IdTerminalPowerShell: SwitchTerminal(TerminalKind::PowerShell); return 0;
+        case IdTerminalWsl: SwitchTerminal(TerminalKind::Wsl); return 0;
         case IdMinimize:
             ShowWindow(hwnd_, SW_MINIMIZE);
             return 0;
@@ -1195,30 +1660,64 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         }
         break;
     case WM_TIMER:
-        if (wParam == WM_APP_RESTART_TIMER) {
-            KillTimer(hwnd_, WM_APP_RESTART_TIMER);
-            if (!shuttingDown_ && restartAttempts_ < 3) {
-                ++restartAttempts_;
-                if (!StartTerminal()) {
-                    AddDiagnostic(L"[快捷控制台] PowerShell 重启失败：" + session_.LastError() + L"\r\n");
-                    SetTimer(hwnd_, WM_APP_RESTART_TIMER, 400, nullptr);
+        if (wParam == WM_APP_INPUT_SCROLL_HIDE_TIMER) {
+            HideInputScrollBar();
+            return 0;
+        }
+        if (wParam == WM_APP_RESTART_TIMER_PS || wParam == WM_APP_RESTART_TIMER_WSL) {
+            const TerminalKind kind = wParam == WM_APP_RESTART_TIMER_WSL ? TerminalKind::Wsl : TerminalKind::PowerShell;
+            auto& terminal = Context(kind);
+            KillTimer(hwnd_, wParam);
+            if (!shuttingDown_ && terminal.restartAttempts < 3) {
+                ++terminal.restartAttempts;
+                if (!StartTerminal(kind)) {
+                    AppendOutput(kind, L"[快捷控制台] 终端重启失败：" + terminal.session.LastError() + L"\r\n");
+                    SetTimer(hwnd_, wParam, 400, nullptr);
                 } else {
-                    AddDiagnostic(L"[快捷控制台] PowerShell 已重新建立。\r\n");
+                    AppendOutput(kind, L"[快捷控制台] 终端已重新建立。\r\n");
                 }
-            } else if (restartAttempts_ >= 3) {
+            } else if (terminal.restartAttempts >= 3 && kind == activeTerminal_) {
                 SetStatus(L"●  终端连续启动失败，请点击“重置”");
             }
             return 0;
         }
         break;
+    case WM_APP_INPUT_SCROLLED:
+        ShowInputScrollBar();
+        return 0;
+    case WM_APP_REFRESH_SCROLLS:
+        RefreshVisibleScrollIndicators();
+        return 0;
     case WM_APP_TERMINAL_OUTPUT: {
         auto* packet = reinterpret_cast<TerminalOutputPacket*>(lParam);
         if (packet != nullptr) {
-            if (packet->generation == currentGeneration_) {
-                auto result = executor_.ConsumeOutput(packet->text);
-                AppendOutput(result.display);
+            auto& terminal = Context(packet->kind);
+            if (packet->generation == terminal.generation) {
+                const bool elevationStarted = RequestElevationIfNeeded(packet->kind, packet->text);
+                auto result = terminal.executor.ConsumeOutput(packet->text);
+                AppendOutput(packet->kind, result.display);
                 if (result.exitCode.has_value()) {
-                    SetStatus(*result.exitCode == 0 ? L"●  完成，退出码 0" : L"●  失败，退出码 " + std::to_wstring(*result.exitCode));
+                    bool linuxRetryStarted = false;
+                    if (packet->kind == TerminalKind::Wsl && terminal.linuxElevationPending &&
+                        *result.exitCode != 0 && !terminal.currentCommand.empty()) {
+                        const std::wstring command = terminal.currentCommand;
+                        terminal.linuxElevationPending = false;
+                        terminal.permissionProbe.clear();
+                        linuxRetryStarted = ExecuteManagedCommand(TerminalKind::Wsl, command, true);
+                        if (linuxRetryStarted) {
+                            AppendOutput(TerminalKind::Wsl,
+                                         L"\r\n[快捷控制台] 权限不足，正在通过 sudo 重试；如有提示请在终端输入密码。\r\n");
+                            if (packet->kind == activeTerminal_) SetStatus(L"●  正在请求 WSL sudo 权限");
+                        }
+                    }
+                    if (!elevationStarted && !linuxRetryStarted && packet->kind == activeTerminal_) {
+                        SetStatus(*result.exitCode == 0 ? L"●  完成，退出码 0" : L"●  失败，退出码 " + std::to_wstring(*result.exitCode));
+                    }
+                    if (!linuxRetryStarted) {
+                        terminal.currentCommand.clear();
+                        terminal.permissionProbe.clear();
+                        terminal.linuxElevationPending = false;
+                    }
                     UpdateBusyState();
                 }
             }
@@ -1229,13 +1728,15 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_APP_TERMINAL_EXITED: {
         auto* packet = reinterpret_cast<TerminalExitPacket*>(lParam);
         if (packet != nullptr) {
-            if (packet->generation == currentGeneration_ && !shuttingDown_) {
-                terminalReady_ = false;
-                executor_.Reset();
+            auto& terminal = Context(packet->kind);
+            if (packet->generation == terminal.generation && !shuttingDown_) {
+                terminal.ready = false;
+                terminal.executor.Reset();
                 UpdateBusyState();
-                SetWindowTextW(connection_, L"PowerShell 未连接");
-                AddDiagnostic(L"[快捷控制台] PowerShell 已退出，正在重新建立会话……\r\n");
-                if (restartAttempts_ < 3) SetTimer(hwnd_, WM_APP_RESTART_TIMER, 400, nullptr);
+                AppendOutput(packet->kind, L"[快捷控制台] 终端已退出，正在重新建立会话……\r\n");
+                const UINT_PTR timer = packet->kind == TerminalKind::Wsl ? WM_APP_RESTART_TIMER_WSL : WM_APP_RESTART_TIMER_PS;
+                if (terminal.restartAttempts < 3) SetTimer(hwnd_, timer, 400, nullptr);
+                if (packet->kind == activeTerminal_) SwitchTerminal(packet->kind, false);
             }
             delete packet;
         }
@@ -1245,7 +1746,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         shuttingDown_ = true;
         PersistUiState();
         EnableWindow(buttonPanel_.Hwnd(), FALSE);
-        session_.Stop();
+        for (auto& terminal : terminals_) terminal->session.Stop();
         DestroyWindow(hwnd_);
         return 0;
     case WM_DESTROY:

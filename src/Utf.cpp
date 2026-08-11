@@ -69,6 +69,19 @@ std::string Base64Encode(std::string_view value)
     return result;
 }
 
+std::string Base64Decode(std::string_view value)
+{
+    if (value.empty()) return {};
+    DWORD outputLength = 0;
+    if (!CryptStringToBinaryA(value.data(), static_cast<DWORD>(value.size()), CRYPT_STRING_BASE64,
+                              nullptr, &outputLength, nullptr, nullptr)) return {};
+    std::string result(outputLength, '\0');
+    if (!CryptStringToBinaryA(value.data(), static_cast<DWORD>(value.size()), CRYPT_STRING_BASE64,
+                              reinterpret_cast<BYTE*>(result.data()), &outputLength, nullptr, nullptr)) return {};
+    result.resize(outputLength);
+    return result;
+}
+
 std::wstring Win32ErrorMessage(unsigned long error)
 {
     wchar_t* buffer = nullptr;

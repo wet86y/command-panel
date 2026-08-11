@@ -12,7 +12,5 @@ public:
     void Reset();
 
 private:
-    enum class State { Normal, Escape, Csi, Osc, OscEscape };
-    State state_ = State::Normal;
     Utf8StreamDecoder decoder_;
 };

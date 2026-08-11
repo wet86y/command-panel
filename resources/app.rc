@@ -17,9 +17,11 @@ BEGIN
     BEGIN
         BLOCK "080404b0"
         BEGIN
+            VALUE "CompanyName", "快捷控制台\0"
             VALUE "FileDescription", "快捷控制台\0"
-            VALUE "InternalName", "CommandPanel\0"
-            VALUE "OriginalFilename", "CommandPanel.exe\0"
+            VALUE "FileVersion", "1.0.0.0\0"
+            VALUE "InternalName", "快捷控制台\0"
+            VALUE "OriginalFilename", "快捷控制台.exe\0"
             VALUE "ProductName", "快捷控制台\0"
             VALUE "ProductVersion", "1.0.0\0"
         END

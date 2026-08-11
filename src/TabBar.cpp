@@ -2,6 +2,7 @@
 #include "CommandMenu.h"
 #include "UiTheme.h"
 
+#include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -27,7 +28,7 @@ bool TabBar::Create(HWND parent)
         wc.lpfnWndProc = WndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_HAND);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = className;
         RegisterClassW(&wc);
         registered = true;
@@ -167,9 +168,12 @@ LRESULT TabBar::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT paint{};
-        HDC dc = BeginPaint(hwnd_, &paint);
+        HDC targetDc = BeginPaint(hwnd_, &paint);
         RECT client{};
         GetClientRect(hwnd_, &client);
+        HDC dc = nullptr;
+        HPAINTBUFFER buffer = BeginBufferedPaint(targetDc, &client, BPBF_COMPATIBLEBITMAP, nullptr, &dc);
+        if (buffer == nullptr) dc = targetDc;
         const UINT dpi = GetDpiForWindow(hwnd_);
         if (fontDpi_ != dpi) {
             if (font_ != nullptr) DeleteObject(font_);
@@ -209,6 +213,7 @@ LRESULT TabBar::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         RECT plus = add;
         DrawTextW(dc, L"+", -1, &plus, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
         SelectObject(dc, oldFont);
+        if (buffer != nullptr) EndBufferedPaint(buffer, TRUE);
         EndPaint(hwnd_, &paint);
         return 0;
     }
