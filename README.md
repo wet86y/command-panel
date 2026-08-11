@@ -103,10 +103,10 @@ UI 线程不直接读取 ConPTY 管道。终端后台线程通过 `PostMessageW`
 
 ```powershell
 .\scripts\build-release.ps1
-.\scripts\prepare-release-assets.ps1 -Version 1.0.1 -ReleaseNotes "优化关于窗口排版、按钮绘制与启动文件名规范化。"
+.\scripts\prepare-release-assets.ps1 -Version 1.0.2 -ReleaseNotes "修复更新健康标记与启动文件名规范化交接。"
 ```
 
-在已创建并推送 `v1.0.1` 草稿 Release 后，执行 `.\scripts\publish-release.ps1 -Version 1.0.1 -Finalize`。发布资产包括 EXE、SHA-256、`update.json`、Apache-2.0 许可证、NOTICE、第三方声明和 DesktopUpdateKit 的 MIT 文本。Release 英文资产首次启动后会安全重命名为 `快捷控制台.exe`。
+在已创建并推送 `v1.0.2` 草稿 Release 后，执行 `.\scripts\publish-release.ps1 -Version 1.0.2 -Finalize`。发布资产包括 EXE、SHA-256、`update.json`、Apache-2.0 许可证、NOTICE、第三方声明和 DesktopUpdateKit 的 MIT 文本。Release 英文资产首次启动后会安全重命名为 `快捷控制台.exe`。
 
 ## 许可证
 

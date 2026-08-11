@@ -115,10 +115,16 @@ int App::Run(HINSTANCE instance, int showCommand)
 {
     const StartupRequest startup = ParseStartupRequest();
     if (startup.verifyRelease) return VerifyReleaseBundle(instance) ? 0 : 10;
-    std::wstring normalizationError;
-    const auto normalization = NormalizeExecutableName(instance, CurrentExecutablePath(), L"快捷控制台.exe", normalizationError);
-    if (normalization == ExecutableNameNormalizationResult::RelaunchStarted) return 0;
-    (void)normalizationError; // Name normalization is deliberately non-blocking.
+    const auto normalizeExecutableName = [instance] {
+        std::wstring error;
+        const auto result = NormalizeExecutableName(instance, CurrentExecutablePath(), L"快捷控制台.exe", error);
+        (void)error; // Name normalization is deliberately non-blocking.
+        return result;
+    };
+    // A release asset launched normally can rename before window creation.  An
+    // update health launch must first acknowledge the freshly installed binary;
+    // otherwise the outer updater would mistake this hand-off for a failed update.
+    if (!startup.updateHealthMarker && normalizeExecutableName() == ExecutableNameNormalizationResult::RelaunchStarted) return 0;
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
@@ -137,6 +143,11 @@ int App::Run(HINSTANCE instance, int showCommand)
         if (bufferedPaintInitialized) BufferedPaintUnInit();
         if (SUCCEEDED(comResult)) CoUninitialize();
         return 2;
+    }
+    if (startup.updateHealthMarker && normalizeExecutableName() == ExecutableNameNormalizationResult::RelaunchStarted) {
+        if (bufferedPaintInitialized) BufferedPaintUnInit();
+        if (SUCCEEDED(comResult)) CoUninitialize();
+        return 0;
     }
     ShowWindow(window.Hwnd(), showCommand);
     UpdateWindow(window.Hwnd());
