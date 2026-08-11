@@ -18,7 +18,13 @@ if ($Finalize) {
     $Version = $Version.TrimStart('v', 'V')
     $Latest = gh api "repos/$($Config.repository)/releases/latest" | ConvertFrom-Json
     if ([string]$Latest.tag_name -ne "v$Version") { throw "GitHub latest release does not point to v$Version." }
-    $Manifest = Invoke-RestMethod -Uri "https://github.com/$($Config.repository)/releases/latest/download/update.json" -Headers @{ "Cache-Control" = "no-cache" }
+    $Response = Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$($Config.repository)/releases/latest/download/update.json" -Headers @{ "Cache-Control" = "no-cache" }
+    $Content = if ($Response.Content -is [byte[]]) {
+        [Text.Encoding]::UTF8.GetString([byte[]]$Response.Content).TrimStart([char]0xFEFF)
+    } else {
+        [string]$Response.Content
+    }
+    $Manifest = $Content | ConvertFrom-Json
     if ([string]$Manifest.version -ne $Version -or [string]$Manifest.asset -ne [string]$Config.releaseAssetName) {
         throw "Public update.json does not match the finalized release."
     }
