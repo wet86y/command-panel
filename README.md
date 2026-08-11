@@ -99,14 +99,16 @@ UI 线程不直接读取 ConPTY 管道。终端后台线程通过 `PostMessageW`
 
 下载节点只负责 EXE 传输；版本清单与 SHA-256 始终以 GitHub Release 为信任源。关闭关于窗口默认暂停传输，选择“后台下载”后才会继续。更新助手会等待当前进程退出、替换 EXE、启动新版并等待 `--update-health` 健康标记；超时或校验失败会回滚。
 
+Release 资产名固定为 `quick-command-panel.exe`，可直接运行和更新。启动后将该资产改为本地产品名 `快捷控制台.exe` 的尝试目前仅为尽力而为：在部分环境和更新交接时不能保证发生，因此**不作为更新成功、安装成功或健康检查的判断条件**。在该行为完成稳定验收前，发布说明、自动化测试和支持结论均不得宣称自动改名已保证完成。
+
 发布者可执行：
 
 ```powershell
 .\scripts\build-release.ps1
-.\scripts\prepare-release-assets.ps1 -Version 1.0.3 -ReleaseNotes "修复关于页自绘黑边与更新后自动改名交接。"
+.\scripts\prepare-release-assets.ps1 -Version <版本号> -ReleaseNotes "<本次实际已验证的变更>"
 ```
 
-在已创建并推送 `v1.0.3` 草稿 Release 后，执行 `.\scripts\publish-release.ps1 -Version 1.0.3 -Finalize`。发布资产包括 EXE、SHA-256、`update.json`、Apache-2.0 许可证、NOTICE、第三方声明和 DesktopUpdateKit 的 MIT 文本。Release 英文资产首次启动后会安全重命名为 `快捷控制台.exe`。
+在已创建并推送对应版本的草稿 Release 后，执行 `.\scripts\publish-release.ps1 -Version <版本号> -Finalize`。发布资产包括 EXE、SHA-256、`update.json`、Apache-2.0 许可证、NOTICE、第三方声明和 DesktopUpdateKit 的 MIT 文本。发布前必须以实际 Release EXE 完成下载、校验、安装和重启验收；自动改名不在当前发布门禁内。
 
 ## 许可证
 
